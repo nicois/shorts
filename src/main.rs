@@ -1,0 +1,792 @@
+use std::collections::{HashMap, HashSet};
+use std::io::BufRead;
+use std::path::{Path, PathBuf};
+
+use clap::Parser;
+
+use shorts::cache::ImportCache;
+use shorts::git::GitRepo;
+use shorts::graph::Trees;
+use shorts::roots::{calculate_namespace_roots, calculate_python_roots, expand_root_glob};
+
+#[derive(Parser)]
+#[command(name = "shorts", version, about = "Like pants dependees, but not as long")]
+struct Cli {
+    /// Input files to find dependees for. If omitted, uses git to detect changed files.
+    files: Vec<String>,
+
+    /// \0-separated output (for xargs). Default: newline-separated.
+    #[arg(short = '0')]
+    null_separator: bool,
+
+    /// Only show warning and error messages. Default: info level.
+    #[arg(long)]
+    quiet: bool,
+
+    /// Show additional diagnostic messages. Default: info level.
+    #[arg(long)]
+    verbose: bool,
+
+    /// Show relative paths instead of absolute. Default: absolute paths.
+    #[arg(long)]
+    relative: bool,
+
+    /// Git ref to calculate changes relative to. Default: origin/main, origin/master, or $GIT_DEFAULT_UPSTREAM.
+    #[arg(long = "ref")]
+    git_ref: Option<String>,
+
+    /// Explicit Python source root (repeatable). Default: auto-detected from input files.
+    #[arg(long = "root")]
+    roots: Vec<String>,
+
+    /// Glob pattern for source root directories (repeatable)
+    #[arg(long = "root-glob")]
+    root_globs: Vec<String>,
+
+    /// Read source roots from stdin (one per line)
+    #[arg(long)]
+    roots_from_stdin: bool,
+
+    /// Glob pattern to exclude from output (repeatable)
+    #[arg(long = "exclude")]
+    excludes: Vec<String>,
+
+    /// Output results as JSON. Default: plain text.
+    #[arg(long)]
+    json: bool,
+
+    /// Show which input file triggered each dependee
+    #[arg(long)]
+    explain: bool,
+
+    /// Show why each file was included in the output
+    #[arg(long)]
+    debug: bool,
+
+    /// Support PEP 420 namespace packages. Default: regular packages (requires __init__.py).
+    #[arg(long)]
+    namespace_packages: bool,
+
+    /// Include pants BUILD files in output. Default: off.
+    #[arg(long)]
+    build_files: bool,
+
+    /// Show referencing BUILD files in dependees output. Default: off.
+    #[arg(long)]
+    show_build_files: bool,
+
+    /// Base name for BUILD files. Matches exact name and name.* variants.
+    #[arg(long, default_value = "BUILD")]
+    build_file_name: String,
+}
+
+#[derive(serde::Serialize)]
+struct JsonOutput {
+    dependees: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    changed_files: Vec<String>,
+    roots: Vec<String>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    explanations: HashMap<String, Vec<String>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    build_files: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct JsonOutputDebug {
+    dependees: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    changed_files: Vec<String>,
+    roots: Vec<String>,
+    reasons: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    build_files: Vec<String>,
+}
+
+/// Find all build files for a Python file by walking up from its directory.
+/// Matches the exact `base_name` and `base_name.*` variants.
+/// Returns files from the nearest directory that contains any match.
+fn find_build_files(path: &Path, base_name: &str) -> Vec<PathBuf> {
+    let prefix = format!("{}.", base_name);
+    let mut dir = match path.parent() {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    loop {
+        let mut found = Vec::new();
+        let build = dir.join(base_name);
+        if build.is_file() {
+            found.push(build);
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with(&prefix) && entry.path().is_file() {
+                    found.push(entry.path());
+                }
+            }
+        }
+        if !found.is_empty() {
+            found.sort();
+            return found;
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => return Vec::new(),
+        }
+    }
+}
+
+/// Collect build files for a set of paths, returning deduplicated sorted paths.
+fn collect_build_files(paths: &[PathBuf], base_name: &str) -> Vec<PathBuf> {
+    let mut build_files: HashSet<PathBuf> = HashSet::new();
+    for path in paths {
+        for build in find_build_files(path, base_name) {
+            build_files.insert(build);
+        }
+    }
+    let mut result: Vec<PathBuf> = build_files.into_iter().collect();
+    result.sort();
+    result
+}
+
+/// Check if a build file path matches any in the referencing set, using canonical paths.
+fn is_referencing_build(path: &Path, referencing: &HashSet<PathBuf>) -> bool {
+    if referencing.is_empty() {
+        return false;
+    }
+    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    referencing.iter().any(|r| {
+        let r_canon = r.canonicalize().unwrap_or_else(|_| r.to_path_buf());
+        canon == r_canon
+    })
+}
+
+/// Scan all build files under the given roots to find ones whose `dependencies`
+/// or `dependency_globs` reference any of the given non-Python changed files.
+///
+/// Returns `(dependee_files, build_files)`:
+/// - `dependee_files`: Python source files in the directories of matching BUILD files
+///   (these are the files "owned" by the targets that depend on the changed files)
+/// - `build_files`: the matching BUILD file paths themselves
+fn find_dependees_via_build_files(
+    changed_files: &HashSet<PathBuf>,
+    roots: &HashSet<PathBuf>,
+    base_name: &str,
+) -> (HashSet<PathBuf>, HashSet<PathBuf>) {
+    use std::fs;
+    use walkdir::WalkDir;
+
+    if changed_files.is_empty() {
+        return (HashSet::new(), HashSet::new());
+    }
+
+    let prefix = format!("{}.", base_name);
+    let mut matching_build_files = HashSet::new();
+
+    for root in roots {
+        for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy();
+            if name.as_ref() != base_name && !name.starts_with(&prefix) {
+                continue;
+            }
+            let build_path = entry.path();
+            let build_dir = match build_path.parent() {
+                Some(d) => d,
+                None => continue,
+            };
+            let content = match fs::read_to_string(build_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            let mut matched = false;
+            for changed in changed_files {
+                if matched {
+                    break;
+                }
+                // Try to get a relative path from root to the changed file
+                let rel = match changed.strip_prefix(root) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                let rel_str = rel.to_string_lossy();
+
+                // Check if the BUILD file content contains this path as a literal string
+                if content.contains(rel_str.as_ref()) {
+                    matched = true;
+                    continue;
+                }
+
+                // Also check relative to the BUILD file's directory
+                if let Ok(rel_to_build) = changed.strip_prefix(build_dir) {
+                    let rel_to_build_str = rel_to_build.to_string_lossy();
+                    if content.contains(rel_to_build_str.as_ref()) {
+                        matched = true;
+                        continue;
+                    }
+                }
+
+                // Check dependency_globs patterns in the content
+                for line in content.lines() {
+                    let trimmed = line.trim().trim_matches('"').trim_matches(',');
+                    if !trimmed.contains('*') && !trimmed.contains('?') {
+                        continue;
+                    }
+                    if let Ok(pat) = glob::Pattern::new(trimmed) {
+                        if pat.matches(&rel_str) {
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if matched {
+                matching_build_files.insert(build_path.to_path_buf());
+            }
+        }
+    }
+
+    // Collect Python files referenced in matching BUILD files' dependencies.
+    // Also collect Python files co-located in the BUILD file's directory.
+    let mut dependee_files = HashSet::new();
+    for build_path in &matching_build_files {
+        let build_dir = match build_path.parent() {
+            Some(d) => d,
+            None => continue,
+        };
+        let content = match fs::read_to_string(build_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        // Extract file paths from dependencies list entries
+        for line in content.lines() {
+            let trimmed = line.trim().trim_matches(',').trim();
+            // Match quoted strings that look like file paths
+            let dep = trimmed.trim_matches('"').trim_matches('\'');
+            if !dep.ends_with(".py") {
+                continue;
+            }
+            // Skip target references (contain ':')
+            if dep.contains(':') {
+                continue;
+            }
+            // Resolve relative to each root
+            for root in roots {
+                let candidate = root.join(dep);
+                if candidate.is_file() {
+                    dependee_files.insert(candidate);
+                    break;
+                }
+            }
+        }
+
+        // Also collect Python files in the BUILD file's directory
+        if let Ok(entries) = fs::read_dir(build_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                        if ext == "py" {
+                            dependee_files.insert(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (dependee_files, matching_build_files)
+}
+
+fn should_exclude(path: &Path, cwd: &Path, excludes: &[String]) -> bool {
+    if excludes.is_empty() {
+        return false;
+    }
+    let rel = path.strip_prefix(cwd).unwrap_or(path);
+    let rel_str = rel.to_str().unwrap_or("");
+    let basename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+    for pattern in excludes {
+        let pat = match glob::Pattern::new(pattern) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        // Match against relative path
+        if pat.matches(rel_str) {
+            return true;
+        }
+        // Match against basename
+        if pat.matches(basename) {
+            return true;
+        }
+        // Match against directory components
+        for component in rel.components() {
+            if let Some(s) = component.as_os_str().to_str() {
+                if pat.matches(s) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn format_path(path: &Path, cwd: &Path, relative: bool) -> String {
+    if relative {
+        path.strip_prefix(cwd)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string()
+    } else {
+        path.to_string_lossy().to_string()
+    }
+}
+
+fn main() {
+    let cli = Cli::parse();
+
+    // Initialize logging
+    let log_level = if cli.quiet {
+        log::LevelFilter::Warn
+    } else if cli.verbose {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    };
+    env_logger::Builder::new().filter_level(log_level).init();
+
+    let cwd = std::env::current_dir().expect("failed to get current directory");
+
+    // 1. Discover git repo from "."
+    let repo = GitRepo::discover(&cwd);
+
+    // 2. Determine input files and upstream ref
+    let files_from_cli = !cli.files.is_empty();
+    let upstream_ref: Option<String> = if files_from_cli {
+        None
+    } else {
+        let r = match &repo {
+            Some(r) => r,
+            None => {
+                eprintln!("error: not in a git repository and no files specified");
+                std::process::exit(1);
+            }
+        };
+        Some(
+            cli.git_ref
+                .clone()
+                .unwrap_or_else(|| r.default_upstream().to_string()),
+        )
+    };
+
+    let input_files: HashSet<PathBuf> = if files_from_cli {
+        cli.files
+            .iter()
+            .map(|f| {
+                let p = PathBuf::from(f);
+                if p.is_absolute() {
+                    p
+                } else {
+                    cwd.join(&p)
+                }
+            })
+            .filter_map(|p| p.canonicalize().ok())
+            .collect()
+    } else {
+        let r = repo.as_ref().unwrap();
+        let git_root = r.root().to_path_buf();
+        if cwd != git_root {
+            log::warn!("running from subdirectory; changes are detected relative to git root");
+        }
+        r.changed_paths(upstream_ref.as_deref().unwrap())
+    };
+
+    // 3. Collect explicit roots
+    let mut all_roots: HashSet<PathBuf> = HashSet::new();
+
+    // --root flags
+    for r in &cli.roots {
+        let p = PathBuf::from(r);
+        let p = if p.is_absolute() { p } else { cwd.join(&p) };
+        if let Ok(abs) = p.canonicalize() {
+            all_roots.insert(abs);
+        } else {
+            log::warn!("root path does not exist: {}", r);
+        }
+    }
+
+    // --roots-from-stdin
+    if cli.roots_from_stdin {
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            match line {
+                Ok(line) => {
+                    let line = line.trim().to_string();
+                    if !line.is_empty() {
+                        let p = PathBuf::from(&line);
+                        let p = if p.is_absolute() { p } else { cwd.join(&p) };
+                        if let Ok(abs) = p.canonicalize() {
+                            all_roots.insert(abs);
+                        } else {
+                            log::warn!("stdin root path does not exist: {}", line);
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("error reading stdin: {}", e);
+                    break;
+                }
+            }
+        }
+    }
+
+    // 4. Expand --root-glob patterns
+    for pattern in &cli.root_globs {
+        let expanded = expand_root_glob(pattern);
+        if expanded.is_empty() {
+            log::warn!("root-glob pattern matched no directories: {}", pattern);
+        }
+        all_roots.extend(expanded);
+    }
+
+    // 5. Determine Python roots
+    let has_explicit_roots =
+        !cli.roots.is_empty() || !cli.root_globs.is_empty() || cli.roots_from_stdin;
+
+    let python_roots = if has_explicit_roots {
+        all_roots
+    } else if cli.namespace_packages {
+        calculate_namespace_roots(&input_files, repo.as_ref().map(|r| r.root()))
+    } else {
+        calculate_python_roots(&input_files)
+    };
+
+    log::debug!("python roots: {:?}", python_roots);
+    log::debug!("input files: {:?}", input_files);
+
+    // 5b. Separate non-Python files for BUILD file reverse lookup
+    //     Exclude BUILD files themselves — they are metadata, not source.
+    let build_base = &cli.build_file_name;
+    let build_prefix = format!("{}.", build_base);
+    let is_build_file = |p: &Path| -> bool {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .map_or(false, |n| n == build_base || n.starts_with(&build_prefix))
+    };
+    let non_python_files: HashSet<PathBuf> = input_files
+        .iter()
+        .filter(|p| {
+            p.extension().and_then(|e| e.to_str()).map_or(true, |e| e != "py")
+                && !is_build_file(p)
+        })
+        .cloned()
+        .collect();
+    let input_files: HashSet<PathBuf> = input_files
+        .into_iter()
+        .filter(|p| {
+            p.extension().and_then(|e| e.to_str()).map_or(false, |e| e == "py")
+                && !is_build_file(p)
+        })
+        .collect();
+    if !non_python_files.is_empty() {
+        log::debug!("non-python changed files: {:?}", non_python_files);
+    }
+
+    // 5c. Find targets that depend on non-Python changed files via BUILD files.
+    //     Returns Python source files owned by those targets, plus the BUILD files.
+    let (build_dependee_files, referencing_build_files) = if !non_python_files.is_empty() {
+        let mut search_roots: HashSet<PathBuf> = python_roots.clone();
+        if let Some(r) = &repo {
+            search_roots.insert(r.root().to_path_buf());
+        }
+        find_dependees_via_build_files(&non_python_files, &search_roots, &cli.build_file_name)
+    } else {
+        (HashSet::new(), HashSet::new())
+    };
+    if !build_dependee_files.is_empty() {
+        log::debug!("dependees via BUILD files: {:?}", build_dependee_files);
+    }
+    if !referencing_build_files.is_empty() {
+        log::debug!("BUILD files referencing non-python changes: {:?}", referencing_build_files);
+    }
+
+    // 6. Load cache and filter input files to only semantically changed ones
+    //    (only when files come from git detection, not explicit CLI args)
+    let cache_dir = repo.as_ref().map(|r| r.root()).unwrap_or(&cwd);
+    let cache = ImportCache::load(cache_dir);
+    let input_files = if let (false, Some(r), Some(ref uref)) = (files_from_cli, &repo, &upstream_ref) {
+        cache.filter_semantically_changed(&input_files, r, uref)
+    } else {
+        input_files
+    };
+    log::debug!("semantically changed files: {:?}", input_files);
+
+    // 6b. Detect which specific symbols changed (for symbol-aware filtering)
+    let (symbol_changes, fallback_files) = if let (false, Some(r), Some(ref uref)) = (files_from_cli, &repo, &upstream_ref) {
+        ImportCache::detect_changed_symbols(&input_files, r, uref)
+    } else {
+        // CLI-specified files: no upstream to compare, use full module-level
+        (std::collections::HashMap::new(), input_files.clone())
+    };
+    log::debug!("symbol changes: {} files with symbol info, {} fallback files",
+        symbol_changes.len(), fallback_files.len());
+
+    // 7. Build trees
+    let trees = Trees::build(python_roots.clone(), cli.namespace_packages, cache, Some(cache_dir));
+
+    // 8. Compute dependees and output
+    if cli.explain {
+        let mut explained = trees.get_dependees_symbol_aware_explained(&symbol_changes, &fallback_files);
+        // Add BUILD-discovered dependees with non-Python triggers
+        let non_py_triggers: Vec<PathBuf> = non_python_files.iter().cloned().collect();
+        for dep in build_dependee_files.iter() {
+            explained.entry(dep.clone()).or_insert_with(|| non_py_triggers.clone());
+        }
+        if cli.show_build_files {
+            for dep in referencing_build_files.iter() {
+                explained.entry(dep.clone()).or_insert_with(|| non_py_triggers.clone());
+            }
+        }
+
+        // Sort for deterministic output
+        let mut entries: Vec<(PathBuf, Vec<PathBuf>)> = explained
+            .into_iter()
+            .filter(|(p, _)| p.is_file())
+            .filter(|(p, _)| !should_exclude(p, &cwd, &cli.excludes))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let dep_paths: Vec<PathBuf> = entries.iter().map(|(p, _)| p.clone()).collect();
+        let build_strs: Vec<String> = if cli.build_files {
+            let mut all_builds: HashSet<PathBuf> = HashSet::new();
+            for b in collect_build_files(&dep_paths, &cli.build_file_name) {
+                if cli.show_build_files || !is_referencing_build(&b, &referencing_build_files) {
+                    all_builds.insert(b);
+                }
+            }
+            let mut sorted: Vec<String> = all_builds
+                .iter()
+                .map(|p| format_path(p, &cwd, cli.relative))
+                .collect();
+            sorted.sort();
+            sorted
+        } else {
+            Vec::new()
+        };
+
+        if cli.json {
+            let mut dependees: Vec<String> = Vec::new();
+            let mut explanations: HashMap<String, Vec<String>> = HashMap::new();
+            for (dep, triggers) in &entries {
+                let dep_str = format_path(dep, &cwd, cli.relative);
+                dependees.push(dep_str.clone());
+                let mut trigger_strs: Vec<String> = triggers
+                    .iter()
+                    .map(|t| format_path(t, &cwd, cli.relative))
+                    .collect();
+                trigger_strs.sort();
+                explanations.insert(dep_str, trigger_strs);
+            }
+            dependees.sort();
+
+            let mut root_strs: Vec<String> = python_roots
+                .iter()
+                .map(|r| format_path(r, &cwd, cli.relative))
+                .collect();
+            root_strs.sort();
+
+            let mut changed_strs: Vec<String> = input_files
+                .iter()
+                .map(|f| format_path(f, &cwd, cli.relative))
+                .collect();
+            changed_strs.sort();
+
+            let output = JsonOutput {
+                dependees,
+                changed_files: changed_strs,
+                roots: root_strs,
+                explanations,
+                build_files: build_strs,
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).expect("failed to serialize JSON")
+            );
+        } else {
+            let sep = if cli.null_separator { "\0" } else { "\n" };
+            for (dep, triggers) in &entries {
+                let dep_str = format_path(dep, &cwd, cli.relative);
+                let trigger_strs: Vec<String> = triggers
+                    .iter()
+                    .map(|t| format_path(t, &cwd, cli.relative))
+                    .collect();
+                print!(
+                    "{}  (triggered by: {}){}",
+                    dep_str,
+                    trigger_strs.join(", "),
+                    sep
+                );
+            }
+            for build in &build_strs {
+                print!("{}{}", build, sep);
+            }
+        }
+    } else if cli.debug {
+        let mut with_reasons = trees.get_dependees_symbol_aware_with_reasons(&symbol_changes, &fallback_files);
+        // Add BUILD-discovered dependees with reason
+        for dep in build_dependee_files.iter() {
+            with_reasons.entry(dep.clone()).or_insert_with(|| "BUILD dependency".to_string());
+        }
+        if cli.show_build_files {
+            for dep in referencing_build_files.iter() {
+                with_reasons.entry(dep.clone()).or_insert_with(|| "BUILD dependency".to_string());
+            }
+        }
+
+        let mut entries: Vec<(PathBuf, String)> = with_reasons
+            .into_iter()
+            .filter(|(p, _)| p.is_file())
+            .filter(|(p, _)| !should_exclude(p, &cwd, &cli.excludes))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let dep_paths: Vec<PathBuf> = entries.iter().map(|(p, _)| p.clone()).collect();
+        let build_strs: Vec<String> = if cli.build_files {
+            let mut all_builds: HashSet<PathBuf> = HashSet::new();
+            for b in collect_build_files(&dep_paths, &cli.build_file_name) {
+                if cli.show_build_files || !is_referencing_build(&b, &referencing_build_files) {
+                    all_builds.insert(b);
+                }
+            }
+            let mut sorted: Vec<String> = all_builds
+                .iter()
+                .map(|p| format_path(p, &cwd, cli.relative))
+                .collect();
+            sorted.sort();
+            sorted
+        } else {
+            Vec::new()
+        };
+
+        if cli.json {
+            let mut dependees: Vec<String> = Vec::new();
+            let mut reasons: HashMap<String, String> = HashMap::new();
+            for (dep, reason) in &entries {
+                let dep_str = format_path(dep, &cwd, cli.relative);
+                dependees.push(dep_str.clone());
+                reasons.insert(dep_str, reason.clone());
+            }
+            dependees.sort();
+
+            let mut root_strs: Vec<String> = python_roots
+                .iter()
+                .map(|r| format_path(r, &cwd, cli.relative))
+                .collect();
+            root_strs.sort();
+
+            let mut changed_strs: Vec<String> = input_files
+                .iter()
+                .map(|f| format_path(f, &cwd, cli.relative))
+                .collect();
+            changed_strs.sort();
+
+            let output = JsonOutputDebug {
+                dependees,
+                changed_files: changed_strs,
+                roots: root_strs,
+                reasons,
+                build_files: build_strs,
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).expect("failed to serialize JSON")
+            );
+        } else {
+            let sep = if cli.null_separator { "\0" } else { "\n" };
+            for (dep, reason) in &entries {
+                let dep_str = format_path(dep, &cwd, cli.relative);
+                print!("{}  ({}){}",dep_str, reason, sep);
+            }
+            for build in &build_strs {
+                print!("{}{}", build, sep);
+            }
+        }
+    } else {
+        let mut dependees = trees.get_dependees_symbol_aware(&symbol_changes, &fallback_files);
+        dependees.extend(build_dependee_files.iter().cloned());
+        if cli.show_build_files {
+            dependees.extend(referencing_build_files.iter().cloned());
+        }
+
+        let mut dep_paths: Vec<PathBuf> = dependees
+            .into_iter()
+            .filter(|p| p.is_file())
+            .filter(|p| !should_exclude(p, &cwd, &cli.excludes))
+            .collect();
+        dep_paths.sort();
+
+        let build_strs: Vec<String> = if cli.build_files {
+            let mut all_builds: HashSet<PathBuf> = HashSet::new();
+            for b in collect_build_files(&dep_paths, &cli.build_file_name) {
+                if cli.show_build_files || !is_referencing_build(&b, &referencing_build_files) {
+                    all_builds.insert(b);
+                }
+            }
+            let mut sorted: Vec<String> = all_builds
+                .iter()
+                .map(|p| format_path(p, &cwd, cli.relative))
+                .collect();
+            sorted.sort();
+            sorted
+        } else {
+            Vec::new()
+        };
+
+        if cli.json {
+            let dependees: Vec<String> = dep_paths
+                .iter()
+                .map(|p| format_path(p, &cwd, cli.relative))
+                .collect();
+
+            let mut root_strs: Vec<String> = python_roots
+                .iter()
+                .map(|r| format_path(r, &cwd, cli.relative))
+                .collect();
+            root_strs.sort();
+
+            let mut changed_strs: Vec<String> = input_files
+                .iter()
+                .map(|f| format_path(f, &cwd, cli.relative))
+                .collect();
+            changed_strs.sort();
+
+            let output = JsonOutput {
+                dependees,
+                changed_files: changed_strs,
+                roots: root_strs,
+                explanations: HashMap::new(),
+                build_files: build_strs,
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).expect("failed to serialize JSON")
+            );
+        } else {
+            let sep = if cli.null_separator { "\0" } else { "\n" };
+            for dep in &dep_paths {
+                let dep_str = format_path(dep, &cwd, cli.relative);
+                print!("{}{}", dep_str, sep);
+            }
+            for build in &build_strs {
+                print!("{}{}", build, sep);
+            }
+        }
+    }
+}
