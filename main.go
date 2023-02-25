@@ -1,35 +1,70 @@
 package main
 
 import (
+	"flag"
 	"fmt"
-	"sort"
+	"os"
+	"path/filepath"
 
-	"github.com/nicois/pytestw/file"
-	"github.com/nicois/pytestw/pyast"
+	"github.com/nicois/file"
+	"github.com/nicois/git"
+	"github.com/nicois/pyast"
+	log "github.com/sirupsen/logrus"
 )
 
-type Alpha []string
+// FIXME: if in subdir and change not under there,
 
-func (a Alpha) Len() int           { return len(a) }
-func (a Alpha) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
-func (a Alpha) Less(i, j int) bool { return a[i] < a[j] }
-
-// TODO: make generic when F37
-func Listify(m file.Paths) []string {
-	result := make([]string, len(m))
-	i := 0
-	for k := range m {
-		result[i] = k
-		i++
-	}
-	sort.Sort(Alpha(result))
-	return result
-}
+// there will be no results
 
 func main() {
-	// log.SetLevel(log.DebugLevel)
-	tree := pyast.Build(".")
-	for d := range tree.GetDependees(file.CreatePaths("/home/nick.farrell/git/aiven-core/aiven/prune/base.py")) {
-		fmt.Println(d)
+	pythonNullSeparator := flag.Bool("0", false, `\0-separated output (for xargs)`)
+	relative := flag.Bool("relative", false, "Show relative instead of absolute paths")
+	verbose := flag.Bool("verbose", false, `verbose logging`)
+	quiet := flag.Bool("quiet", false, `be quiet; only log warnings and above`)
+	flag.Parse()
+	if *quiet {
+		log.SetLevel(log.WarnLevel)
+	} else if *verbose {
+		log.SetLevel(log.DebugLevel)
+	}
+	var files file.Paths
+	g, _ := git.Create(".")
+	if filenames := flag.Args(); len(filenames) > 0 {
+		files = file.CreatePaths(filenames...)
+	} else {
+		if g == nil {
+			log.Fatal("No paths were provided, and you are not running this from inside a git repository.")
+		}
+		upstream := g.GetDefaultUpstream()
+		log.Infof("As no paths were provided, calculating changes relative to %v, and reporting modules which depend on them.", upstream)
+		files = g.GetChangedPaths(upstream)
+	}
+	pythonRoots := pyast.CalculatePythonRoots(files)
+	trees := pyast.BuildTrees(pythonRoots, g)
+	dependees, err := trees.GetDependees(files)
+	if err != nil {
+		log.Fatal(err)
+		os.Exit(1)
+	}
+	cwd, err := filepath.Abs(".")
+	if err != nil {
+		panic(err)
+	}
+	for d := range dependees {
+		if *relative {
+			if rel, err := filepath.Rel(cwd, d); err != nil {
+				log.Warn(err)
+				fmt.Print(d)
+			} else {
+				fmt.Print(rel)
+			}
+		} else {
+			fmt.Print(d)
+		}
+		if *pythonNullSeparator {
+			fmt.Print("\x00")
+		} else {
+			fmt.Println("")
+		}
 	}
 }
