@@ -5,8 +5,8 @@ github.com/fsnotify/fsnotify v1.6.0 h1:n+5WquG0fcWoWp6xPWfHdbskMCQaFnG6PfBrh1Ky4
 github.com/fsnotify/fsnotify v1.6.0/go.mod h1:sl3t1tCWJFWoRz9R8WJCbQihKKwmorjAbSClcnxKAGw=
 github.com/nicois/cache v0.0.0-20230227103345-85fe1201b3d4 h1:lRsXTRrRA70PSsVoek5TX47Z7hkY82Cj03zyuqkxm8M=
 github.com/nicois/cache v0.0.0-20230227103345-85fe1201b3d4/go.mod h1:7us46w6JGvLy8F0QZHnYEE8uV5jkc2E1N7RvS4VhDyQ=
-github.com/nicois/file v0.0.0-20230228130931-9393defb996b h1:HJedY+a/eKhiH04007ZPMUSQ9LxGfT7dF280xxEqhT0=
-github.com/nicois/file v0.0.0-20230228130931-9393defb996b/go.mod h1:lMfhjniPLg3qS3+dZkJ9s8Z/eWu/6tXl/cZSnTuRE2s=
+github.com/nicois/file v0.0.0-20230227095154-1d4e7ac1358a h1:wonAEcW+OacF4JMec+zujOQiPkBDfc+TETVIuLbnf8I=
+github.com/nicois/file v0.0.0-20230227095154-1d4e7ac1358a/go.mod h1:lMfhjniPLg3qS3+dZkJ9s8Z/eWu/6tXl/cZSnTuRE2s=
 github.com/nicois/git v0.0.0-20230228004916-5e651dd241ec h1:4YVgKxwyq0krz1i1GTW1ykK9SY1yTRqBHwA4W/Mcfdg=
 github.com/nicois/git v0.0.0-20230228004916-5e651dd241ec/go.mod h1:5SX+mUPavU5tMEsSwvRoE2t2a03nLF4MOF5W8t2sX1E=
 github.com/nicois/pyast v0.0.0-20230228131005-8791ede019d7 h1:oLjvUT89MxjNMHvjazWAygpzUPiO6qJsfa7bD5pgDwg=
