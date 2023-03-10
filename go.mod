@@ -2,6 +2,12 @@ module github.com/nicois/shorts
 
 go 1.18
 
+replace github.com/nicois/cache => ../cache
+replace github.com/nicois/pyast => ../pyast
+replace github.com/nicois/file => ../file
+replace github.com/nicois/git => ../git
+
+
 require (
 	github.com/nicois/file v0.0.0-20230309073744-e6bf63959c2a
 	github.com/nicois/git v0.0.0-20230228004916-5e651dd241ec
