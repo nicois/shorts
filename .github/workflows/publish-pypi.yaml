@@ -22,5 +22,6 @@ jobs:
           python-version: "3.7"
 
       - run: echo ${GITHUB_REF}
+      - run: git --version
       - run: git for-each-ref --format='%(objecttype)' ${GITHUB_REF}
       - run: test $(git for-each-ref --format='%(objecttype)' ${GITHUB_REF}) == tag
