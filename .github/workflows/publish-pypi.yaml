@@ -23,7 +23,7 @@ jobs:
 
       - run: echo ${GITHUB_REF}
       - run: git --version
-      - run: git fetch --tags
+      - run: git fetch --tags --force
       - run: git for-each-ref --format='%(objecttype)' ${GITHUB_REF}
       - run: git describe --exact-match HEAD
       - run: test $(git for-each-ref --format='%(objecttype)' ${GITHUB_REF}) == tag
