@@ -21,9 +21,6 @@ jobs:
         with:
           python-version: "3.7"
 
-      - name: Verify tag is annotated
-        if: startsWith(github.ref, 'refs/tags')
-        run: >-
-          echo ${GITHUB_REF}
-          git for-each-ref --format='%(objecttype)' ${GITHUB_REF}
-          test $(git for-each-ref --format='%(objecttype)' ${GITHUB_REF}) == tag
+      - run: echo ${GITHUB_REF}
+      - run: git for-each-ref --format='%(objecttype)' ${GITHUB_REF}
+      - run: test $(git for-each-ref --format='%(objecttype)' ${GITHUB_REF}) == tag
