@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/nicois/file"
 	"github.com/nicois/git"
@@ -17,6 +18,7 @@ import (
 
 func main() {
 	pythonNullSeparator := flag.Bool("0", false, `\0-separated output (for xargs)`)
+	relative := flag.Bool("relative", false, "Show relative instead of absolute paths")
 	verbose := flag.Bool("verbose", false, `verbose logging`)
 	quiet := flag.Bool("quiet", false, `be quiet; only log warnings and above`)
 	flag.Parse()
@@ -44,8 +46,21 @@ func main() {
 		log.Fatal(err)
 		os.Exit(1)
 	}
+	cwd, err := filepath.Abs(".")
+	if err != nil {
+		panic(err)
+	}
 	for d := range dependees {
-		fmt.Print(d)
+		if *relative {
+			if rel, err := filepath.Rel(cwd, d); err != nil {
+				log.Warn(err)
+				fmt.Print(d)
+			} else {
+				fmt.Print(rel)
+			}
+		} else {
+			fmt.Print(d)
+		}
 		if *pythonNullSeparator {
 			fmt.Print("\x00")
 		} else {

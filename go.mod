@@ -1,12 +1,14 @@
 module github.com/nicois/shorts
 
-go 1.18
+go 1.20
 
 replace github.com/nicois/cache => ../cache
-replace github.com/nicois/pyast => ../pyast
-replace github.com/nicois/file => ../file
-replace github.com/nicois/git => ../git
 
+replace github.com/nicois/pyast => ../pyast
+
+replace github.com/nicois/file => ../file
+
+replace github.com/nicois/git => ../git
 
 require (
 	github.com/nicois/file v0.0.0-20230309073744-e6bf63959c2a
@@ -16,6 +18,7 @@ require (
 )
 
 require (
+	github.com/alecthomas/participle/v2 v2.0.0-beta.5 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/nicois/cache v0.0.0-20230309075418-3aae7a3eee00 // indirect
 	golang.org/x/sync v0.1.0 // indirect
