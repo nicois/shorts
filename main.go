@@ -51,6 +51,9 @@ func main() {
 		panic(err)
 	}
 	for d := range dependees {
+		if !file.FileExists(d) {
+			continue
+		}
 		if *relative {
 			if rel, err := filepath.Rel(cwd, d); err != nil {
 				log.Warn(err)

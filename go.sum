@@ -14,8 +14,8 @@ github.com/nicois/file v0.0.0-20230309073744-e6bf63959c2a h1:jjEbY6pEIaVfDIeJHAt
 github.com/nicois/file v0.0.0-20230309073744-e6bf63959c2a/go.mod h1:lMfhjniPLg3qS3+dZkJ9s8Z/eWu/6tXl/cZSnTuRE2s=
 github.com/nicois/git v0.0.0-20230228004916-5e651dd241ec h1:4YVgKxwyq0krz1i1GTW1ykK9SY1yTRqBHwA4W/Mcfdg=
 github.com/nicois/git v0.0.0-20230228004916-5e651dd241ec/go.mod h1:5SX+mUPavU5tMEsSwvRoE2t2a03nLF4MOF5W8t2sX1E=
-github.com/nicois/pyast v0.0.0-20230504101125-e476dec54579 h1:BaqyGNj3OZUXJKs+Ftw8Z43hNdVbENvwCz72EQXCYXI=
-github.com/nicois/pyast v0.0.0-20230504101125-e476dec54579/go.mod h1:cSM2clm/2B9VHikgcHhBNYB+zbukOs0nVSzTu+0jZ+s=
+github.com/nicois/pyast v0.0.0-20230505020632-75e51e577905 h1:ggsirYytTonKRBOrAS4l2hJf12xrn8WYc3SNdkOv+2M=
+github.com/nicois/pyast v0.0.0-20230505020632-75e51e577905/go.mod h1:cSM2clm/2B9VHikgcHhBNYB+zbukOs0nVSzTu+0jZ+s=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/sirupsen/logrus v1.9.0 h1:trlNQbNUG3OdDrDil03MCb1H2o9nJ1x4/5LYw7byDE0=
