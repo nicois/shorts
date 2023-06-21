@@ -5,7 +5,7 @@ go 1.19
 require (
 	github.com/nicois/file v0.0.0-20230309073744-e6bf63959c2a
 	github.com/nicois/git v0.0.0-20230228004916-5e651dd241ec
-	github.com/nicois/pyast v0.0.0-20230523000032-6590cc08c2d7
+	github.com/nicois/pyast v0.0.0-20230531023401-9ec6ef8e9503
 	github.com/sirupsen/logrus v1.9.2
 )
 

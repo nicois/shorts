@@ -18,8 +18,8 @@ github.com/nicois/file v0.0.0-20230309073744-e6bf63959c2a h1:jjEbY6pEIaVfDIeJHAt
 github.com/nicois/file v0.0.0-20230309073744-e6bf63959c2a/go.mod h1:lMfhjniPLg3qS3+dZkJ9s8Z/eWu/6tXl/cZSnTuRE2s=
 github.com/nicois/git v0.0.0-20230228004916-5e651dd241ec h1:4YVgKxwyq0krz1i1GTW1ykK9SY1yTRqBHwA4W/Mcfdg=
 github.com/nicois/git v0.0.0-20230228004916-5e651dd241ec/go.mod h1:5SX+mUPavU5tMEsSwvRoE2t2a03nLF4MOF5W8t2sX1E=
-github.com/nicois/pyast v0.0.0-20230523000032-6590cc08c2d7 h1:prPid/XczH2nqWINtGOUAUjOYsar58v9sgkb78xL8+U=
-github.com/nicois/pyast v0.0.0-20230523000032-6590cc08c2d7/go.mod h1:cSM2clm/2B9VHikgcHhBNYB+zbukOs0nVSzTu+0jZ+s=
+github.com/nicois/pyast v0.0.0-20230531023401-9ec6ef8e9503 h1:GckeI05dJQe87759aF0JHw90eEP8vPK8Myx5S/glZ3c=
+github.com/nicois/pyast v0.0.0-20230531023401-9ec6ef8e9503/go.mod h1:cSM2clm/2B9VHikgcHhBNYB+zbukOs0nVSzTu+0jZ+s=
 github.com/pingcap/errors v0.11.4 h1:lFuQV/oaUMGcD2tqt+01ROSmJs75VG1ToEOkZIZ4nE4=
 github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
