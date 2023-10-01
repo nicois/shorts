@@ -20,6 +20,7 @@ func main() {
 	pythonNullSeparator := flag.Bool("0", false, `\0-separated output (for xargs)`)
 	relative := flag.Bool("relative", false, "Show relative instead of absolute paths")
 	verbose := flag.Bool("verbose", false, `verbose logging`)
+    ref := flag.String("ref","", "git ref to calculate changes relative to (if no files are provided on the commandline)")
 	quiet := flag.Bool("quiet", false, `be quiet; only log warnings and above`)
 	flag.Parse()
 	if *quiet {
@@ -35,7 +36,12 @@ func main() {
 		if g == nil {
 			log.Fatal("No paths were provided, and you are not running this from inside a git repository.")
 		}
-		upstream := g.GetDefaultUpstream()
+        var upstream string
+        if (*ref == "") {
+            upstream = g.GetDefaultUpstream()
+        } else {
+            upstream = string(*ref)
+        }
 		log.Infof("As no paths were provided, calculating changes relative to %v, and reporting modules which depend on them.", upstream)
 		files = g.GetChangedPaths(upstream)
 	}
