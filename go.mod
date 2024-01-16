@@ -3,8 +3,8 @@ module github.com/nicois/shorts
 go 1.19
 
 require (
-	github.com/nicois/file v0.0.0-20230916023402-5830340aa5d0
-	github.com/nicois/git v0.0.0-20230916031112-13e589d4c928
+	github.com/nicois/file v0.0.0-20240109220158-74095eea75b9
+	github.com/nicois/git v0.0.0-20240116111631-5418d249d3b2
 	github.com/nicois/pyast v0.0.0-20230531023401-9ec6ef8e9503
 	github.com/sirupsen/logrus v1.9.2
 )
