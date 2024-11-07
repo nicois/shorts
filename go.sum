@@ -25,8 +25,8 @@ github.com/nicois/fastdb v0.0.0-20240511060213-776b25c4dbb9 h1:8Q7Qed7vdJ2y2RfcC
 github.com/nicois/fastdb v0.0.0-20240511060213-776b25c4dbb9/go.mod h1:JeUba7aNW8L15j+0cRZbzC+B+6lOxcHhKjm8pU/WQQM=
 github.com/nicois/file v0.0.0-20240109220158-74095eea75b9 h1:a5/OOyjQnVQm4zzrWK8tjDR88zNbgaVwZ52XjL95pEE=
 github.com/nicois/file v0.0.0-20240109220158-74095eea75b9/go.mod h1:lMfhjniPLg3qS3+dZkJ9s8Z/eWu/6tXl/cZSnTuRE2s=
-github.com/nicois/git v0.0.0-20240517033651-c1863e56d5a5 h1:knTyze3cvUxdzTZSyt0c5zf6ORsC0Nl7vXb0wU8oNAQ=
-github.com/nicois/git v0.0.0-20240517033651-c1863e56d5a5/go.mod h1:+7UpXBngO4sQjh2HqBPfhuH/Nf+2RXQ5EQ7AaVVAWW8=
+github.com/nicois/git v0.0.0-20240517063345-3629e4c9ca0c h1:wV1evVrrMB+UnGYGUOgnzaOrIEvEyucdRmu+NhPHRv4=
+github.com/nicois/git v0.0.0-20240517063345-3629e4c9ca0c/go.mod h1:M1FIJjGNok/fpwezBBtTOIrPXymlO9VOjuVqpQ02xKw=
 github.com/nicois/pyast v0.0.0-20240517034549-1d469bb0dc42 h1:oZEhnQm8bp7psQA7VKqNJS623VnHxm8RCBJ4fFHsU8U=
 github.com/nicois/pyast v0.0.0-20240517034549-1d469bb0dc42/go.mod h1:VQngAMQK3Bhn6xordbTYlPpbaJGZSWOHHspv86XeIgM=
 github.com/pingcap/errors v0.11.4 h1:lFuQV/oaUMGcD2tqt+01ROSmJs75VG1ToEOkZIZ4nE4=

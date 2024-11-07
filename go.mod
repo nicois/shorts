@@ -4,7 +4,7 @@ go 1.22
 
 require (
 	github.com/nicois/file v0.0.0-20240109220158-74095eea75b9
-	github.com/nicois/git v0.0.0-20240517033651-c1863e56d5a5
+	github.com/nicois/git v0.0.0-20240517063345-3629e4c9ca0c
 	github.com/nicois/pyast v0.0.0-20240517034549-1d469bb0dc42
 	github.com/sirupsen/logrus v1.9.3
 )

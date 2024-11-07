@@ -17,10 +17,15 @@ import (
 // there will be no results
 
 func main() {
+	g, err := git.Create(".")
+	var upstream string
+	if err == nil {
+		upstream = g.GetDefaultUpstream()
+	}
 	pythonNullSeparator := flag.Bool("0", false, `\0-separated output (for xargs)`)
 	relative := flag.Bool("relative", false, "Show relative instead of absolute paths")
 	verbose := flag.Bool("verbose", false, `verbose logging`)
-	ref := flag.String("ref", "", "git ref to calculate changes relative to (if no files are provided on the commandline)")
+	ref := flag.String("ref", upstream, "git ref to calculate changes relative to (if no files are provided on the commandline)")
 	quiet := flag.Bool("quiet", false, `be quiet; only log warnings and above`)
 	flag.Parse()
 	if *quiet {
@@ -29,20 +34,17 @@ func main() {
 		log.SetLevel(log.DebugLevel)
 	}
 	var files file.Paths
-	g, _ := git.Create(".")
 	if filenames := flag.Args(); len(filenames) > 0 {
+		log.Infof("calculating which modules depend on at least one of the %v specified files", len(filenames))
 		files = file.CreatePaths(filenames...)
 	} else {
 		if g == nil {
-			log.Fatal("No paths were provided, and you are not running this from inside a git repository.")
+			log.Fatal("no paths were provided, and you are not running this from inside a git repository.")
 		}
-		var upstream string
-		if *ref == "" {
-			upstream = g.GetDefaultUpstream()
-		} else {
+		if *ref != "" && *ref != upstream {
 			upstream = string(*ref)
 		}
-		log.Infof("As no paths were provided, calculating changes relative to %v, and reporting modules which depend on them.", upstream)
+		log.Infof("calculating changes in the current branch relative to %v, and reporting modules which depend on these changes.", upstream)
 		files = g.GetChangedPaths(upstream)
 	}
 	pythonRoots := pyast.CalculatePythonRoots(files)
