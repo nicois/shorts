@@ -31,6 +31,8 @@ pub struct Tree {
     pub root: PathBuf,
     /// Module-level reverse edges (existing)
     pub importers: HashMap<String, HashSet<String>>,
+    /// Module-level forward edges: module -> set of modules it imports
+    pub dependencies: HashMap<String, HashSet<String>>,
     /// Symbol-level reverse edges:
     /// (imported_module, symbol_name) -> set of importer module names
     pub symbol_importers: HashMap<(String, String), HashSet<String>>,
@@ -165,16 +167,21 @@ impl Tree {
             .collect();
 
         let mut importers: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut dependencies: HashMap<String, HashSet<String>> = HashMap::new();
         let mut symbol_importers: HashMap<(String, String), HashSet<String>> = HashMap::new();
         let mut all_importers: HashMap<String, HashSet<String>> = HashMap::new();
 
         for fr in file_results {
-            // Module-level edges (existing)
+            // Module-level edges (existing reverse + new forward)
             for dep in &fr.deps {
                 importers
                     .entry(dep.clone())
                     .or_default()
                     .insert(fr.module_class.clone());
+                dependencies
+                    .entry(fr.module_class.clone())
+                    .or_default()
+                    .insert(dep.clone());
             }
 
             // Symbol-level edges
@@ -201,6 +208,7 @@ impl Tree {
         Tree {
             root,
             importers,
+            dependencies,
             symbol_importers,
             all_importers,
         }
@@ -259,6 +267,49 @@ impl Trees {
             }
         }
         None
+    }
+
+    /// Union of forward dependencies from ALL trees for a given class.
+    pub fn get_dependencies_across_trees(&self, class: &str) -> HashSet<String> {
+        let mut result = HashSet::new();
+        for tree in &self.trees {
+            if let Some(deps) = tree.dependencies.get(class) {
+                result.extend(deps.iter().cloned());
+            }
+        }
+        result
+    }
+
+    /// BFS to find all transitive forward dependencies of the given input files.
+    ///
+    /// Returns the set of file paths that the input files transitively import.
+    pub fn get_dependencies(&self, input_files: &HashSet<PathBuf>) -> HashSet<PathBuf> {
+        let input_classes: HashSet<String> = input_files
+            .iter()
+            .filter_map(|p| self.path_to_class_across_trees(p))
+            .collect();
+
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut pending = input_classes;
+
+        while !pending.is_empty() {
+            let mut next = HashSet::new();
+            for class in &pending {
+                if !seen.insert(class.clone()) {
+                    continue;
+                }
+                for dep in self.get_dependencies_across_trees(class) {
+                    if !seen.contains(&dep) {
+                        next.insert(dep);
+                    }
+                }
+            }
+            pending = next;
+        }
+
+        seen.iter()
+            .filter_map(|c| self.class_to_path_across_trees(c))
+            .collect()
     }
 
     /// BFS to find all transitive dependees of the given input files.
@@ -614,15 +665,21 @@ mod tests {
 
     fn make_tree(root: &str, edges: &[(&str, &str)]) -> Tree {
         let mut importers: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut dependencies: HashMap<String, HashSet<String>> = HashMap::new();
         for (imported, importer) in edges {
             importers
                 .entry(imported.to_string())
                 .or_default()
                 .insert(importer.to_string());
+            dependencies
+                .entry(importer.to_string())
+                .or_default()
+                .insert(imported.to_string());
         }
         Tree {
             root: PathBuf::from(root),
             importers,
+            dependencies,
             symbol_importers: HashMap::new(),
             all_importers: HashMap::new(),
         }
@@ -814,11 +871,16 @@ mod tests {
         all_edges: &[(&str, &str)],
     ) -> Tree {
         let mut importers: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut dependencies: HashMap<String, HashSet<String>> = HashMap::new();
         for (imported, importer) in module_edges {
             importers
                 .entry(imported.to_string())
                 .or_default()
                 .insert(importer.to_string());
+            dependencies
+                .entry(importer.to_string())
+                .or_default()
+                .insert(imported.to_string());
         }
         let mut symbol_importers: HashMap<(String, String), HashSet<String>> = HashMap::new();
         for (module, symbol, importer) in symbol_edges {
@@ -837,6 +899,7 @@ mod tests {
         Tree {
             root: PathBuf::from(root),
             importers,
+            dependencies,
             symbol_importers,
             all_importers,
         }
@@ -936,6 +999,53 @@ mod tests {
         assert!(result.contains("myapp.b"), "uses foo directly");
         assert!(result.contains("myapp.c"), "imports B transitively");
         assert!(!result.contains("myapp.d"), "uses A but not foo");
+    }
+
+    #[test]
+    fn test_forward_dependencies() {
+        // a imports b, b imports c -> forward deps of c = {c, b, a} (c depends on nothing it imports)
+        // Actually: edges are (imported, importer), so ("myapp.a", "myapp.b") means b imports a
+        // Forward deps of myapp.b: b imports a, so deps = {b, a}
+        let tree = make_tree("/project", &[("myapp.a", "myapp.b"), ("myapp.b", "myapp.c")]);
+        let trees = Trees {
+            trees: vec![tree],
+        };
+
+        let deps = trees.get_dependencies_across_trees("myapp.b");
+        assert!(deps.contains("myapp.a"), "b imports a");
+        assert!(!deps.contains("myapp.c"), "b does not import c");
+    }
+
+    #[test]
+    fn test_forward_dependencies_transitive() {
+        // c imports b, b imports a -> forward deps of c should include b and a
+        let tree = make_tree("/project", &[("myapp.a", "myapp.b"), ("myapp.b", "myapp.c")]);
+        let trees = Trees {
+            trees: vec![tree],
+        };
+
+        // We need to test the BFS version via class names
+        let input_classes: HashSet<String> = ["myapp.c".to_string()].into();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut pending = input_classes;
+        while !pending.is_empty() {
+            let mut next = HashSet::new();
+            for class in &pending {
+                if !seen.insert(class.clone()) {
+                    continue;
+                }
+                for dep in trees.get_dependencies_across_trees(class) {
+                    if !seen.contains(&dep) {
+                        next.insert(dep);
+                    }
+                }
+            }
+            pending = next;
+        }
+
+        assert!(seen.contains("myapp.c"), "includes self");
+        assert!(seen.contains("myapp.b"), "c imports b");
+        assert!(seen.contains("myapp.a"), "b imports a (transitive)");
     }
 
     #[test]

@@ -187,6 +187,298 @@ fn test_cli_debug_json_output() {
     }
 }
 
+// ── --stdin merge tests ──
+
+#[test]
+fn test_stdin_merge() {
+    use std::io::Write;
+    let root = testdata("simple");
+    let extra_file = root.join("myapp/__init__.py");
+    let mut child = shorts_bin()
+        .args(["--root", root.to_str().unwrap(), "--stdin", "--relative"])
+        .arg(root.join("myapp/utils.py"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Write extra path to stdin
+    child.stdin.take().unwrap().write_all(
+        format!("{}\n", extra_file.display()).as_bytes()
+    ).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Should contain both the dependees of utils.py AND the stdin file
+    assert!(stdout.contains("__init__.py"), "stdin path should be merged: {stdout}");
+    assert!(stdout.contains("models.py"), "dependees should still be present: {stdout}");
+}
+
+#[test]
+fn test_stdin_dedup() {
+    use std::io::Write;
+    let root = testdata("simple");
+    // models.py is already a dependee of utils.py; passing it via stdin should not duplicate
+    let extra_file = root.join("myapp/models.py");
+    let mut child = shorts_bin()
+        .args(["--root", root.to_str().unwrap(), "--stdin", "--relative"])
+        .arg(root.join("myapp/utils.py"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(
+        format!("{}\n", extra_file.display()).as_bytes()
+    ).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let models_count = stdout.lines().filter(|l| l.contains("models.py")).count();
+    assert_eq!(models_count, 1, "models.py should appear exactly once (dedup): {stdout}");
+}
+
+// ── --dependencies tests ──
+
+#[test]
+fn test_dependencies_forward() {
+    let root = testdata("simple");
+    // views.py imports models.py which imports utils.py
+    let output = shorts_bin()
+        .args(["--root", root.to_str().unwrap(), "--dependencies", "--relative"])
+        .arg(root.join("myapp/views.py"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("models.py"), "views imports models: {stdout}");
+    assert!(stdout.contains("utils.py"), "models imports utils (transitive): {stdout}");
+}
+
+#[test]
+fn test_dependencies_no_reverse() {
+    let root = testdata("simple");
+    // utils.py is imported by models.py, but forward deps of utils should NOT include models
+    let output = shorts_bin()
+        .args(["--root", root.to_str().unwrap(), "--dependencies", "--relative"])
+        .arg(root.join("myapp/utils.py"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // utils.py has no imports, so only itself
+    assert!(!stdout.contains("models.py"), "should NOT include reverse deps: {stdout}");
+}
+
+#[test]
+fn test_dependencies_json() {
+    let root = testdata("simple");
+    let output = shorts_bin()
+        .args(["--root", root.to_str().unwrap(), "--dependencies", "--json", "--relative"])
+        .arg(root.join("myapp/views.py"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let deps = json["dependees"].as_array().expect("dependees array");
+    let dep_strs: Vec<&str> = deps.iter().map(|d| d.as_str().unwrap()).collect();
+    assert!(dep_strs.iter().any(|d| d.contains("models.py")),
+        "should include models.py: {:?}", dep_strs);
+}
+
+#[test]
+fn test_dependencies_with_filter() {
+    let root = testdata("simple");
+    let output = shorts_bin()
+        .args([
+            "--root", root.to_str().unwrap(),
+            "--dependencies",
+            "--filter", "*utils*",
+            "--relative",
+        ])
+        .arg(root.join("myapp/views.py"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("utils.py"), "utils should match filter: {stdout}");
+    assert!(!stdout.contains("models.py"), "models should not match filter: {stdout}");
+}
+
+// ── Directory input expansion tests ──
+
+#[test]
+fn test_directory_input_expansion() {
+    let root = testdata("simple");
+    // Pass a directory as input — should expand to all .py files
+    let output = shorts_bin()
+        .args(["--root", root.to_str().unwrap(), "--changed-files-only", "--relative"])
+        .arg(root.join("myapp"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("utils.py"), "should expand to utils.py: {stdout}");
+    assert!(stdout.contains("models.py"), "should expand to models.py: {stdout}");
+    assert!(stdout.contains("views.py"), "should expand to views.py: {stdout}");
+}
+
+#[test]
+fn test_directory_input_with_double_colon() {
+    let root = testdata("simple");
+    // pants-style :: suffix
+    let dir_spec = format!("{}::", root.join("myapp").display());
+    let output = shorts_bin()
+        .args(["--root", root.to_str().unwrap(), "--changed-files-only", "--relative"])
+        .arg(&dir_spec)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("utils.py"), "should expand :: to utils.py: {stdout}");
+    assert!(stdout.contains("models.py"), "should expand :: to models.py: {stdout}");
+}
+
+#[test]
+fn test_directory_expansion_dependees() {
+    let root = testdata("simple");
+    // Pass directory as input for dependee analysis (not --changed-files-only)
+    let output = shorts_bin()
+        .args(["--root", root.to_str().unwrap(), "--relative"])
+        .arg(root.join("myapp"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Should have dependees since we expanded the directory
+    assert!(!stdout.trim().is_empty(), "should have dependees: {stdout}");
+}
+
+// ── --filter tests ──
+
+#[test]
+fn test_filter_keeps_matching() {
+    let root = testdata("simple");
+    let output = shorts_bin()
+        .args([
+            "--root", root.to_str().unwrap(),
+            "--filter", "test_*",
+            "--relative",
+        ])
+        .arg(root.join("myapp/utils.py"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Only test files should pass through filter
+    for line in stdout.lines() {
+        assert!(line.contains("test_"), "non-test file in output: {line}");
+    }
+}
+
+#[test]
+fn test_filter_path_prefix() {
+    let root = testdata("simple");
+    let output = shorts_bin()
+        .args([
+            "--root", root.to_str().unwrap(),
+            "--filter", "*/models*",
+            "--relative",
+        ])
+        .arg(root.join("myapp/utils.py"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("models.py"), "models.py should match filter: {stdout}");
+}
+
+#[test]
+fn test_filter_with_changed_files_only() {
+    let root = testdata("simple");
+    let output = shorts_bin()
+        .args([
+            "--root", root.to_str().unwrap(),
+            "--changed-files-only",
+            "--filter", "*.py",
+            "--relative",
+        ])
+        .arg(root.join("myapp/utils.py"))
+        .arg(root.join("myapp/models.py"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("utils.py"), "utils.py should pass filter: {stdout}");
+    assert!(stdout.contains("models.py"), "models.py should pass filter: {stdout}");
+}
+
+#[test]
+fn test_filter_empty_result() {
+    let root = testdata("simple");
+    let output = shorts_bin()
+        .args([
+            "--root", root.to_str().unwrap(),
+            "--filter", "nonexistent_pattern_xyz*",
+        ])
+        .arg(root.join("myapp/utils.py"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.trim().is_empty(), "should have no output with non-matching filter: {stdout}");
+}
+
+// ── --changed-files-only tests ──
+
+#[test]
+fn test_changed_files_only_text() {
+    let root = testdata("simple");
+    let output = shorts_bin()
+        .args(["--root", root.to_str().unwrap(), "--changed-files-only", "--relative"])
+        .arg(root.join("myapp/utils.py"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Should only contain the input file, not dependees
+    assert!(stdout.contains("utils.py"), "should contain the input file: {stdout}");
+    assert!(!stdout.contains("models.py"), "should NOT contain dependees: {stdout}");
+}
+
+#[test]
+fn test_changed_files_only_json() {
+    let root = testdata("simple");
+    let output = shorts_bin()
+        .args(["--root", root.to_str().unwrap(), "--changed-files-only", "--json", "--relative"])
+        .arg(root.join("myapp/utils.py"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let changed = json["changed_files"].as_array().expect("changed_files array");
+    assert!(!changed.is_empty(), "changed_files should not be empty");
+    assert!(json.get("dependees").is_none(), "should not have dependees field");
+}
+
+#[test]
+fn test_json_always_includes_changed_files() {
+    let root = testdata("simple");
+    let output = shorts_bin()
+        .args(["--root", root.to_str().unwrap(), "--json"])
+        .arg(root.join("myapp/utils.py"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    // changed_files should always be present now (not skipped when empty)
+    assert!(json.get("changed_files").is_some(),
+        "changed_files should always be in JSON output: {stdout}");
+}
+
 // ── BUILD file tests ──
 
 #[test]

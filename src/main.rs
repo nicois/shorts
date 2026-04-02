@@ -51,6 +51,10 @@ struct Cli {
     #[arg(long = "exclude")]
     excludes: Vec<String>,
 
+    /// Glob pattern to include in output — only matching paths are shown (repeatable)
+    #[arg(long = "filter")]
+    filters: Vec<String>,
+
     /// Output results as JSON. Default: plain text.
     #[arg(long)]
     json: bool,
@@ -62,6 +66,18 @@ struct Cli {
     /// Show why each file was included in the output
     #[arg(long)]
     debug: bool,
+
+    /// Output only the changed files (no dependee analysis). Requires git detection or explicit files.
+    #[arg(long)]
+    changed_files_only: bool,
+
+    /// Show forward dependencies (what the input files import) instead of reverse dependees
+    #[arg(long)]
+    dependencies: bool,
+
+    /// Read additional file paths from stdin to merge into output (deduplicated)
+    #[arg(long, conflicts_with = "roots_from_stdin")]
+    stdin: bool,
 
     /// Support PEP 420 namespace packages. Default: regular packages (requires __init__.py).
     #[arg(long)]
@@ -83,7 +99,6 @@ struct Cli {
 #[derive(serde::Serialize)]
 struct JsonOutput {
     dependees: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     changed_files: Vec<String>,
     roots: Vec<String>,
     #[serde(skip_serializing_if = "HashMap::is_empty")]
@@ -95,7 +110,6 @@ struct JsonOutput {
 #[derive(serde::Serialize)]
 struct JsonOutputDebug {
     dependees: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     changed_files: Vec<String>,
     roots: Vec<String>,
     reasons: HashMap<String, String>,
@@ -338,6 +352,36 @@ fn should_exclude(path: &Path, cwd: &Path, excludes: &[String]) -> bool {
     false
 }
 
+fn should_include(path: &Path, cwd: &Path, filters: &[String]) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
+    let rel = path.strip_prefix(cwd).unwrap_or(path);
+    let rel_str = rel.to_str().unwrap_or("");
+    let basename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+    for pattern in filters {
+        let pat = match glob::Pattern::new(pattern) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if pat.matches(rel_str) {
+            return true;
+        }
+        if pat.matches(basename) {
+            return true;
+        }
+        for component in rel.components() {
+            if let Some(s) = component.as_os_str().to_str() {
+                if pat.matches(s) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn format_path(path: &Path, cwd: &Path, relative: bool) -> String {
     if relative {
         path.strip_prefix(cwd)
@@ -387,18 +431,32 @@ fn main() {
     };
 
     let input_files: HashSet<PathBuf> = if files_from_cli {
-        cli.files
-            .iter()
-            .map(|f| {
-                let p = PathBuf::from(f);
-                if p.is_absolute() {
-                    p
-                } else {
-                    cwd.join(&p)
+        let mut files = HashSet::new();
+        for f in &cli.files {
+            // Strip trailing :: (pants-style directory spec)
+            let f = f.strip_suffix("::").unwrap_or(f);
+            let p = PathBuf::from(f);
+            let p = if p.is_absolute() { p } else { cwd.join(&p) };
+            let p = match p.canonicalize() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if p.is_dir() {
+                // Expand directory to all .py files within
+                for entry in walkdir::WalkDir::new(&p)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
+                    let ep = entry.path();
+                    if ep.is_file() && ep.extension().and_then(|e| e.to_str()) == Some("py") {
+                        files.insert(ep.to_path_buf());
+                    }
                 }
-            })
-            .filter_map(|p| p.canonicalize().ok())
-            .collect()
+            } else {
+                files.insert(p);
+            }
+        }
+        files
     } else {
         let r = repo.as_ref().unwrap();
         let git_root = r.root().to_path_buf();
@@ -471,6 +529,33 @@ fn main() {
     log::debug!("python roots: {:?}", python_roots);
     log::debug!("input files: {:?}", input_files);
 
+    // 5a. Handle --changed-files-only: output input files and exit
+    if cli.changed_files_only {
+        let mut file_strs: Vec<String> = input_files
+            .iter()
+            .filter(|f| !should_exclude(f, &cwd, &cli.excludes))
+            .filter(|f| should_include(f, &cwd, &cli.filters))
+            .map(|f| format_path(f, &cwd, cli.relative))
+            .collect();
+        file_strs.sort();
+
+        if cli.json {
+            let output = serde_json::json!({
+                "changed_files": file_strs,
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).expect("failed to serialize JSON")
+            );
+        } else {
+            let sep = if cli.null_separator { "\0" } else { "\n" };
+            for f in &file_strs {
+                print!("{}{}", f, sep);
+            }
+        }
+        return;
+    }
+
     // 5b. Separate non-Python files for BUILD file reverse lookup
     //     Exclude BUILD files themselves — they are metadata, not source.
     let build_base = &cli.build_file_name;
@@ -541,7 +626,80 @@ fn main() {
     // 7. Build trees
     let trees = Trees::build(python_roots.clone(), cli.namespace_packages, cache, Some(cache_dir));
 
-    // 8. Compute dependees and output
+    // 7b. Read additional paths from stdin if --stdin
+    let stdin_paths: HashSet<PathBuf> = if cli.stdin {
+        let stdin = std::io::stdin();
+        stdin
+            .lock()
+            .lines()
+            .filter_map(|line| {
+                let line = line.ok()?;
+                let line = line.trim().to_string();
+                if line.is_empty() {
+                    return None;
+                }
+                let p = PathBuf::from(&line);
+                let p = if p.is_absolute() { p } else { cwd.join(&p) };
+                p.canonicalize().ok()
+            })
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
+    // 8. Handle --dependencies: forward dependency query
+    if cli.dependencies {
+        // For --dependencies, use original input files (before semantic filtering)
+        // since we want to know what these files depend on, not what changed
+        let all_input: HashSet<PathBuf> = symbol_changes.keys().cloned()
+            .chain(fallback_files.iter().cloned())
+            .collect();
+        let forward_deps = trees.get_dependencies(&all_input);
+        let mut dep_paths: Vec<PathBuf> = forward_deps
+            .into_iter()
+            .filter(|p| p.is_file())
+            .filter(|p| !should_exclude(p, &cwd, &cli.excludes))
+            .filter(|p| should_include(p, &cwd, &cli.filters))
+            .collect();
+        dep_paths.sort();
+
+        if cli.json {
+            let dependees: Vec<String> = dep_paths
+                .iter()
+                .map(|p| format_path(p, &cwd, cli.relative))
+                .collect();
+            let mut root_strs: Vec<String> = python_roots
+                .iter()
+                .map(|r| format_path(r, &cwd, cli.relative))
+                .collect();
+            root_strs.sort();
+            let mut changed_strs: Vec<String> = all_input
+                .iter()
+                .map(|f| format_path(f, &cwd, cli.relative))
+                .collect();
+            changed_strs.sort();
+            let output = JsonOutput {
+                dependees,
+                changed_files: changed_strs,
+                roots: root_strs,
+                explanations: HashMap::new(),
+                build_files: Vec::new(),
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).expect("failed to serialize JSON")
+            );
+        } else {
+            let sep = if cli.null_separator { "\0" } else { "\n" };
+            for dep in &dep_paths {
+                let dep_str = format_path(dep, &cwd, cli.relative);
+                print!("{}{}", dep_str, sep);
+            }
+        }
+        return;
+    }
+
+    // 9. Compute dependees and output
     if cli.explain {
         let mut explained = trees.get_dependees_symbol_aware_explained(&symbol_changes, &fallback_files);
         // Add BUILD-discovered dependees with non-Python triggers
@@ -554,12 +712,17 @@ fn main() {
                 explained.entry(dep.clone()).or_insert_with(|| non_py_triggers.clone());
             }
         }
+        // Merge --stdin paths
+        for path in &stdin_paths {
+            explained.entry(path.clone()).or_insert_with(Vec::new);
+        }
 
         // Sort for deterministic output
         let mut entries: Vec<(PathBuf, Vec<PathBuf>)> = explained
             .into_iter()
             .filter(|(p, _)| p.is_file())
             .filter(|(p, _)| !should_exclude(p, &cwd, &cli.excludes))
+            .filter(|(p, _)| should_include(p, &cwd, &cli.filters))
             .collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -649,11 +812,16 @@ fn main() {
                 with_reasons.entry(dep.clone()).or_insert_with(|| "BUILD dependency".to_string());
             }
         }
+        // Merge --stdin paths
+        for path in &stdin_paths {
+            with_reasons.entry(path.clone()).or_insert_with(|| "stdin".to_string());
+        }
 
         let mut entries: Vec<(PathBuf, String)> = with_reasons
             .into_iter()
             .filter(|(p, _)| p.is_file())
             .filter(|(p, _)| !should_exclude(p, &cwd, &cli.excludes))
+            .filter(|(p, _)| should_include(p, &cwd, &cli.filters))
             .collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -724,11 +892,14 @@ fn main() {
         if cli.show_build_files {
             dependees.extend(referencing_build_files.iter().cloned());
         }
+        // Merge --stdin paths
+        dependees.extend(stdin_paths.iter().cloned());
 
         let mut dep_paths: Vec<PathBuf> = dependees
             .into_iter()
             .filter(|p| p.is_file())
             .filter(|p| !should_exclude(p, &cwd, &cli.excludes))
+            .filter(|p| should_include(p, &cwd, &cli.filters))
             .collect();
         dep_paths.sort();
 
