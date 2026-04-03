@@ -121,6 +121,161 @@ struct JsonOutputDebug {
     build_files: Vec<String>,
 }
 
+struct BuildTarget {
+    name: String,
+    sources: Vec<String>,
+    target_type: String,
+}
+
+fn parse_build_targets(content: &str, default_name: &str) -> Vec<BuildTarget> {
+    let known_types = ["python_tests", "python_sources"];
+    let mut targets = Vec::new();
+    let bytes = content.as_bytes();
+    let len = bytes.len();
+    let mut pos = 0;
+
+    while pos < len {
+        // Find next '(' that might be a target call
+        let paren_pos = match content[pos..].find('(') {
+            Some(p) => pos + p,
+            None => break,
+        };
+
+        // Extract identifier before '('
+        let before = content[pos..paren_pos].trim_end();
+        let ident_start = before
+            .rfind(|c: char| !c.is_alphanumeric() && c != '_')
+            .map(|p| p + 1 + pos)
+            .unwrap_or(pos);
+        let target_type = content[ident_start..paren_pos].trim();
+
+        // Find matching ')' with bracket counting
+        let mut depth = 1u32;
+        let mut j = paren_pos + 1;
+        while j < len && depth > 0 {
+            match bytes[j] {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+            j += 1;
+        }
+        let block = &content[paren_pos + 1..j.saturating_sub(1)];
+
+        if known_types.contains(&target_type) {
+            let name = extract_string_param(block, "name")
+                .unwrap_or_else(|| default_name.to_string());
+            let sources = extract_list_param(block, "sources")
+                .unwrap_or_else(|| default_sources(target_type));
+
+            targets.push(BuildTarget {
+                name,
+                sources,
+                target_type: target_type.to_string(),
+            });
+        }
+
+        pos = j;
+    }
+
+    // Sort: python_tests before python_sources for priority
+    targets.sort_by(|a, b| {
+        let priority = |t: &str| -> u8 {
+            match t {
+                "python_tests" => 0,
+                "python_sources" => 1,
+                _ => 2,
+            }
+        };
+        priority(&a.target_type).cmp(&priority(&b.target_type))
+    });
+
+    targets
+}
+
+/// Find `param=` in block, ensuring it's not a substring of a longer identifier
+/// (e.g., searching for "name=" must not match "rename=").
+fn find_param(block: &str, param: &str) -> Option<usize> {
+    let pattern = format!("{}=", param);
+    let mut search_from = 0;
+    loop {
+        let idx = block[search_from..].find(&pattern)?;
+        let abs_idx = search_from + idx;
+        // Ensure preceding char is not alphanumeric or underscore
+        if abs_idx > 0 {
+            let prev = block.as_bytes()[abs_idx - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                search_from = abs_idx + 1;
+                continue;
+            }
+        }
+        return Some(abs_idx);
+    }
+}
+
+fn extract_string_param(block: &str, param: &str) -> Option<String> {
+    let pattern = format!("{}=", param);
+    let idx = find_param(block, param)?;
+    let after = &block[idx + pattern.len()..];
+    let after = after.trim_start();
+    let quote = after.as_bytes().first()?;
+    if *quote != b'"' && *quote != b'\'' {
+        return None;
+    }
+    let end = after[1..].find(*quote as char)?;
+    Some(after[1..1 + end].to_string())
+}
+
+fn extract_list_param(block: &str, param: &str) -> Option<Vec<String>> {
+    let pattern = format!("{}=", param);
+    let idx = find_param(block, param)?;
+    let after = &block[idx + pattern.len()..];
+    let after = after.trim_start();
+    if !after.starts_with('[') {
+        return None; // Not a simple list literal — fall back to defaults
+    }
+    let end = after.find(']')?;
+    let list_content = &after[1..end];
+    let mut items = Vec::new();
+    for item in list_content.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        // Extract quoted string
+        let quote = item.as_bytes().first()?;
+        if *quote != b'"' && *quote != b'\'' {
+            return None; // Non-literal expression — fall back to defaults
+        }
+        let rest = &item[1..];
+        let end = rest.find(*quote as char)?;
+        items.push(rest[..end].to_string());
+    }
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
+}
+
+fn default_sources(target_type: &str) -> Vec<String> {
+    match target_type {
+        "python_tests" => vec![
+            "test_*.py".to_string(),
+            "*_test.py".to_string(),
+            "tests.py".to_string(),
+            "conftest.py".to_string(),
+        ],
+        "python_sources" => vec![
+            "*.py".to_string(),
+            "!test_*.py".to_string(),
+            "!*_test.py".to_string(),
+            "!conftest.py".to_string(),
+        ],
+        _ => vec![],
+    }
+}
+
 /// Find all build files for a Python file by walking up from its directory.
 /// Matches the exact `base_name` and `base_name.*` variants.
 /// Returns files from the nearest directory that contains any match.
@@ -973,5 +1128,125 @@ fn main() {
                 print!("{}{}", build, sep);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_python_tests_with_name() {
+        let content = r#"
+python_tests(
+    name="tests",
+    timeout=120,
+)
+"#;
+        let targets = parse_build_targets(content, "mydir");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].name, "tests");
+        assert_eq!(targets[0].target_type, "python_tests");
+        assert_eq!(targets[0].sources, vec![
+            "test_*.py", "*_test.py", "tests.py", "conftest.py",
+        ]);
+    }
+
+    #[test]
+    fn test_parse_python_sources_with_custom_sources() {
+        let content = r#"
+python_sources(
+    name="lib",
+    sources=["app.py", "util.py"],
+)
+"#;
+        let targets = parse_build_targets(content, "mydir");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].name, "lib");
+        assert_eq!(targets[0].sources, vec!["app.py", "util.py"]);
+    }
+
+    #[test]
+    fn test_parse_defaults_name_to_dir() {
+        let content = r#"
+python_tests()
+"#;
+        let targets = parse_build_targets(content, "pipeline");
+        assert_eq!(targets[0].name, "pipeline");
+    }
+
+    #[test]
+    fn test_parse_multiple_targets() {
+        let content = r#"
+python_tests(
+    name="tests",
+)
+
+python_sources(
+    name="sources",
+)
+"#;
+        let targets = parse_build_targets(content, "mydir");
+        assert_eq!(targets.len(), 2);
+        // python_tests should come first (priority sorting)
+        assert_eq!(targets[0].target_type, "python_tests");
+        assert_eq!(targets[1].target_type, "python_sources");
+    }
+
+    #[test]
+    fn test_parse_ignores_unknown_target_types() {
+        let content = r#"
+shell_sources(name="sh")
+python_tests(name="tests")
+resources(name="data")
+"#;
+        let targets = parse_build_targets(content, "mydir");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].target_type, "python_tests");
+    }
+
+    #[test]
+    fn test_parse_single_quoted_name() {
+        let content = r#"
+python_tests(
+    name='tests',
+)
+"#;
+        let targets = parse_build_targets(content, "mydir");
+        assert_eq!(targets[0].name, "tests");
+    }
+
+    #[test]
+    fn test_parse_python_sources_default_sources() {
+        let content = r#"
+python_sources(
+    name="lib",
+)
+"#;
+        let targets = parse_build_targets(content, "mydir");
+        assert_eq!(targets[0].sources, vec!["*.py", "!test_*.py", "!*_test.py", "!conftest.py"]);
+    }
+
+    #[test]
+    fn test_parse_name_not_confused_with_rename() {
+        let content = r#"
+python_tests(
+    rename="wrong",
+    name="correct",
+)
+"#;
+        let targets = parse_build_targets(content, "mydir");
+        assert_eq!(targets[0].name, "correct");
+    }
+
+    #[test]
+    fn test_parse_sources_with_negation() {
+        let content = r#"
+python_sources(
+    sources=["*.py", "!test_*.py"],
+)
+"#;
+        let targets = parse_build_targets(content, "mydir");
+        assert_eq!(targets[0].sources, vec!["*.py", "!test_*.py"]);
     }
 }
