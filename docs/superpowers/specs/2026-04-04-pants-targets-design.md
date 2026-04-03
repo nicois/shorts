@@ -43,7 +43,7 @@ For each output file path:
 
 1. Walk up from the file's directory looking for a BUILD file (reusing existing `find_build_files` / `collect_build_files` logic, respecting `--build-file-name`).
 2. Parse the BUILD file's target definitions.
-3. Match the filename against each target's source patterns. Targets are checked in the order they appear in the BUILD file; first match wins.
+3. Match the filename against each target's source patterns. Targets are checked in priority order (`python_tests` before `python_sources`); first match wins.
 4. If matched, append `:target_name` to the formatted path string.
 
 ## Implementation
