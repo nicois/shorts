@@ -602,9 +602,13 @@ fn main() {
         log::debug!("BUILD files referencing non-python changes: {:?}", referencing_build_files);
     }
 
-    // 6. Load cache and filter input files to only semantically changed ones
-    //    (only when files come from git detection, not explicit CLI args)
+    // 6. Set up cache directory, gitignore, and clean up legacy cache
     let cache_dir = repo.as_ref().map(|r| r.root()).unwrap_or(&cwd);
+    shorts::cache::ensure_gitignored(cache_dir);
+    shorts::cache::remove_legacy_cache(cache_dir);
+
+    // Filter input files to only semantically changed ones
+    //    (only when files come from git detection, not explicit CLI args)
     let input_files = if let (false, Some(r), Some(ref uref)) = (files_from_cli, &repo, &upstream_ref) {
         ImportCache::filter_semantically_changed(&input_files, r, uref)
     } else {
