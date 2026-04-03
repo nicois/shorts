@@ -41,9 +41,11 @@ pub struct ImportCache {
 /// on file location, so the same source content in different packages should produce
 /// different cache entries.
 pub fn cache_key(content: &[u8], module_class: &str) -> u64 {
-    let content_hash = xxhash_rust::xxh3::xxh3_64(content);
-    let module_hash = xxhash_rust::xxh3::xxh3_64(module_class.as_bytes());
-    content_hash ^ module_hash.rotate_left(32)
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    hasher.update(content);
+    hasher.update(&[0xff]); // domain separator
+    hasher.update(module_class.as_bytes());
+    hasher.digest()
 }
 
 /// Compute a hash of the semantic content of Python source code.
@@ -158,6 +160,7 @@ impl ImportCache {
                     }
                     if let Err(e) = fs::rename(&tmp_path, &path) {
                         log::warn!("failed to rename cache file: {}", e);
+                        let _ = fs::remove_file(&tmp_path);
                     }
                 }
                 Err(e) => log::warn!("failed to serialize cache entry: {}", e),
@@ -188,7 +191,7 @@ impl ImportCache {
         if !cache_root.exists() {
             return;
         }
-        let accessed = self.accessed.lock().unwrap();
+        let accessed = self.accessed.lock().unwrap().clone();
         let mut unaccessed_count: u64 = 0;
         for entry in walkdir::WalkDir::new(&cache_root)
             .into_iter()
