@@ -78,25 +78,23 @@ fn entry_path(cache_base: &Path, hash: u64) -> PathBuf {
         .join(format!("{}.bin", hex))
 }
 
-/// Ensure `.shorts/` is listed in `.gitignore` at the repo root.
-pub fn ensure_gitignored(repo_root: &Path) {
+/// Warn if `.shorts/` is not listed in `.gitignore` at the repo root.
+pub fn check_gitignored(repo_root: &Path) {
     let gitignore = repo_root.join(".gitignore");
-    let content = fs::read_to_string(&gitignore).unwrap_or_default();
+    let content = match fs::read_to_string(&gitignore) {
+        Ok(c) => c,
+        Err(_) => {
+            log::warn!(".shorts/ is not in .gitignore — consider adding it");
+            return;
+        }
+    };
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed == ".shorts/" || trimmed == ".shorts" {
             return;
         }
     }
-    // Append the entry
-    let mut new_content = content;
-    if !new_content.is_empty() && !new_content.ends_with('\n') {
-        new_content.push('\n');
-    }
-    new_content.push_str(".shorts/\n");
-    if let Err(e) = fs::write(&gitignore, new_content) {
-        log::warn!("failed to update .gitignore: {}", e);
-    }
+    log::warn!(".shorts/ is not in .gitignore — consider adding it");
 }
 
 /// Remove the legacy single-file cache if it exists.

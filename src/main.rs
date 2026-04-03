@@ -615,7 +615,7 @@ fn main() {
     } else {
         repo.as_ref().map(|r| r.root()).unwrap_or(&cwd)
     };
-    shorts::cache::ensure_gitignored(cache_dir);
+    shorts::cache::check_gitignored(cache_dir);
     shorts::cache::remove_legacy_cache(cache_dir);
 
     // Filter input files to only semantically changed ones
