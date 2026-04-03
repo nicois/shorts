@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use rayon::prelude::*;
 use walkdir::WalkDir;
@@ -87,10 +86,24 @@ pub fn class_to_path(root: &Path, class: &str) -> Option<PathBuf> {
     None
 }
 
+/// Per-file result from parallel parsing.
+struct FileResult {
+    module_class: String,
+    deps: HashSet<String>,
+    usage: symbols::ModuleSymbolUsage,
+}
+
+/// A new cache entry to be written to disk after the parallel phase.
+struct NewCacheEntry {
+    key: u64,
+    entry: cache::CacheEntry,
+}
+
 impl Tree {
     /// Scan all Python files under `root` and build the reverse import graph.
     /// Uses the provided cache to skip re-parsing unchanged files.
-    pub fn build(root: PathBuf, namespace_packages: bool, cache: &ImportCache, new_entries: &Mutex<ImportCache>) -> Self {
+    /// Returns the tree and a list of new cache entries to be written.
+    fn build(root: PathBuf, namespace_packages: bool, cache: &ImportCache) -> (Self, Vec<NewCacheEntry>) {
         // Collect file paths first (WalkDir is not thread-safe)
         let paths: Vec<PathBuf> = WalkDir::new(&root)
             .into_iter()
@@ -111,58 +124,60 @@ impl Tree {
             .map(|e| e.into_path())
             .collect();
 
-        /// Per-file parsing result for parallel collection
-        struct FileResult {
-            module_class: String,
-            deps: HashSet<String>,
-            usage: symbols::ModuleSymbolUsage,
-        }
-
         // Parse files in parallel, using cache for unchanged files
-        let file_results: Vec<FileResult> = paths
+        let results: Vec<(FileResult, Option<NewCacheEntry>)> = paths
             .par_iter()
             .filter_map(|path| {
                 let module_class = path_to_class(&root, path)?;
 
-                // Check cache first for imports
-                let (deps, source_opt) = if let Some(cached_imports) = cache.get(path) {
-                    (cached_imports.iter().cloned().collect::<HashSet<_>>(), None)
-                } else {
-                    let source = fs::read_to_string(path).ok()?;
-                    let deps = extract_imports(&module_class, &source);
-                    let hash = cache::semantic_hash(&source);
-                    let sym_hashes = symbols::extract_symbol_hashes(&source);
-                    let sym_hashes_keyed: HashMap<String, u64> = sym_hashes
-                        .iter()
-                        .map(|(sym, h)| (sym.cache_key(), *h))
-                        .collect();
-                    if let Ok(mut entries) = new_entries.lock() {
-                        entries.insert(
-                            path.clone(),
-                            deps.iter().cloned().collect(),
-                            hash,
-                            sym_hashes_keyed,
-                        );
-                    }
-                    (deps, Some(source))
+                let source = fs::read_to_string(path).ok()?;
+                let key = cache::cache_key(source.as_bytes(), &module_class);
+
+                // Check cache by content hash
+                if let Some(entry) = cache.get(key) {
+                    let deps: HashSet<String> = entry.imports.iter().cloned().collect();
+                    let usage = entry.symbol_usage;
+                    return Some((
+                        FileResult { module_class, deps, usage },
+                        None,
+                    ));
+                }
+
+                // Cache miss: parse everything
+                let deps = extract_imports(&module_class, &source);
+                let semantic_hash = cache::semantic_hash(&source);
+                let sym_hashes = symbols::extract_symbol_hashes(&source);
+                let symbol_hashes: HashMap<String, u64> = sym_hashes
+                    .iter()
+                    .map(|(sym, h)| (sym.cache_key(), *h))
+                    .collect();
+                let usage = symbols::extract_symbol_usage(&module_class, &source);
+
+                let new_entry = NewCacheEntry {
+                    key,
+                    entry: cache::CacheEntry {
+                        imports: deps.iter().cloned().collect(),
+                        semantic_hash,
+                        symbol_hashes: Some(symbol_hashes),
+                        symbol_usage: usage.clone(),
+                    },
                 };
 
-                // Extract symbol usage (need source for this)
-                let usage = if let Some(source) = source_opt {
-                    symbols::extract_symbol_usage(&module_class, &source)
-                } else {
-                    // Re-read for symbol usage if we used cached imports
-                    match fs::read_to_string(path) {
-                        Ok(source) => symbols::extract_symbol_usage(&module_class, &source),
-                        Err(_) => symbols::ModuleSymbolUsage::default(),
-                    }
-                };
+                Some((
+                    FileResult { module_class, deps, usage },
+                    Some(new_entry),
+                ))
+            })
+            .collect();
 
-                Some(FileResult {
-                    module_class,
-                    deps,
-                    usage,
-                })
+        let mut new_cache_entries: Vec<NewCacheEntry> = Vec::new();
+        let file_results: Vec<FileResult> = results
+            .into_iter()
+            .map(|(fr, maybe_entry)| {
+                if let Some(entry) = maybe_entry {
+                    new_cache_entries.push(entry);
+                }
+                fr
             })
             .collect();
 
@@ -205,35 +220,39 @@ impl Tree {
             }
         }
 
-        Tree {
+        (Tree {
             root,
             importers,
             dependencies,
             symbol_importers,
             all_importers,
-        }
+        }, new_cache_entries)
     }
 }
 
 impl Trees {
-    pub fn build(roots: HashSet<PathBuf>, namespace_packages: bool, cache: ImportCache, cache_dir: Option<&Path>) -> Self {
-        let new_entries = Mutex::new(ImportCache::default());
+    pub fn build(roots: HashSet<PathBuf>, namespace_packages: bool, cache_dir: Option<&Path>) -> Self {
+        let cache = ImportCache::new(cache_dir);
 
         let roots_vec: Vec<PathBuf> = roots.into_iter().collect();
-        let trees: Vec<Tree> = roots_vec
+        let results: Vec<(Tree, Vec<NewCacheEntry>)> = roots_vec
             .into_par_iter()
             .map(|root| {
                 let root = root.canonicalize().unwrap_or(root);
-                Tree::build(root, namespace_packages, &cache, &new_entries)
+                Tree::build(root, namespace_packages, &cache)
             })
             .collect();
 
-        // Save updated cache
-        if let Some(dir) = cache_dir {
-            let mut final_cache = cache;
-            final_cache.merge(new_entries.into_inner().unwrap_or_default());
-            final_cache.save(dir);
+        let mut trees = Vec::new();
+        let mut all_entries: Vec<(u64, cache::CacheEntry)> = Vec::new();
+        for (tree, new_entries) in results {
+            trees.push(tree);
+            for ne in new_entries {
+                all_entries.push((ne.key, ne.entry));
+            }
         }
+
+        cache.write_entries_and_prune(all_entries);
 
         Trees { trees }
     }

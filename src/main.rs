@@ -605,9 +605,8 @@ fn main() {
     // 6. Load cache and filter input files to only semantically changed ones
     //    (only when files come from git detection, not explicit CLI args)
     let cache_dir = repo.as_ref().map(|r| r.root()).unwrap_or(&cwd);
-    let cache = ImportCache::load(cache_dir);
     let input_files = if let (false, Some(r), Some(ref uref)) = (files_from_cli, &repo, &upstream_ref) {
-        cache.filter_semantically_changed(&input_files, r, uref)
+        ImportCache::filter_semantically_changed(&input_files, r, uref)
     } else {
         input_files
     };
@@ -624,7 +623,7 @@ fn main() {
         symbol_changes.len(), fallback_files.len());
 
     // 7. Build trees
-    let trees = Trees::build(python_roots.clone(), cli.namespace_packages, cache, Some(cache_dir));
+    let trees = Trees::build(python_roots.clone(), cli.namespace_packages, Some(cache_dir));
 
     // 7b. Read additional paths from stdin if --stdin
     let stdin_paths: HashSet<PathBuf> = if cli.stdin {

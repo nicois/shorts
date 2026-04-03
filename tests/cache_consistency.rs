@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use shorts::cache::ImportCache;
 use shorts::graph::Trees;
 use shorts::symbols::Symbol;
 use tempfile::TempDir;
@@ -14,18 +13,18 @@ fn abs_testdata(rel: &str) -> PathBuf {
         .unwrap()
 }
 
-/// Build trees with a fresh (empty) cache, returning the trees and the populated cache dir.
+fn build_with_cache_dir(roots: HashSet<PathBuf>, ns: bool, cache_dir: &std::path::Path) -> Trees {
+    Trees::build(roots, ns, Some(cache_dir))
+}
+
 fn build_with_fresh_cache(roots: HashSet<PathBuf>, ns: bool) -> (Trees, TempDir) {
     let cache_dir = TempDir::new().unwrap();
-    let cache = ImportCache::default();
-    let trees = Trees::build(roots, ns, cache, Some(cache_dir.path()));
+    let trees = build_with_cache_dir(roots, ns, cache_dir.path());
     (trees, cache_dir)
 }
 
-/// Build trees reusing an existing cache from a previous run.
 fn build_with_warm_cache(roots: HashSet<PathBuf>, ns: bool, cache_dir: &std::path::Path) -> Trees {
-    let cache = ImportCache::load(cache_dir);
-    Trees::build(roots, ns, cache, Some(cache_dir))
+    build_with_cache_dir(roots, ns, cache_dir)
 }
 
 // ── Module-level BFS: cache state should not affect results ──

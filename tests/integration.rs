@@ -13,7 +13,7 @@ fn abs_testdata(rel: &str) -> PathBuf {
 #[test]
 fn test_simple_dependees() {
     let root = abs_testdata("simple");
-    let trees = Trees::build([root.clone()].into(), false, Default::default(), None);
+    let trees = Trees::build([root.clone()].into(), false, None);
 
     let input: HashSet<PathBuf> = [root.join("myapp/utils.py")].into();
     let deps = trees.get_dependees(&input);
@@ -28,7 +28,7 @@ fn test_simple_dependees() {
 #[test]
 fn test_transitive_simple() {
     let root = abs_testdata("simple");
-    let trees = Trees::build([root.clone()].into(), false, Default::default(), None);
+    let trees = Trees::build([root.clone()].into(), false, None);
 
     let input: HashSet<PathBuf> = [root.join("myapp/utils.py")].into();
     let deps = trees.get_dependees(&input);
@@ -44,7 +44,7 @@ fn test_transitive_simple() {
 #[test]
 fn test_namespace_packages() {
     let root = abs_testdata("namespace/src");
-    let trees = Trees::build([root.clone()].into(), true, Default::default(), None);
+    let trees = Trees::build([root.clone()].into(), true, None);
 
     let input: HashSet<PathBuf> = [root.join("avn/kafka/consumer.py")].into();
     let deps = trees.get_dependees(&input);
@@ -59,7 +59,7 @@ fn test_namespace_packages() {
 #[test]
 fn test_namespace_packages_disabled() {
     let root = abs_testdata("namespace/src");
-    let trees = Trees::build([root.clone()].into(), false, Default::default(), None);
+    let trees = Trees::build([root.clone()].into(), false, None);
 
     let input: HashSet<PathBuf> = [root.join("avn/kafka/consumer.py")].into();
     let deps = trees.get_dependees(&input);
@@ -77,7 +77,7 @@ fn test_cross_root_dependees() {
     let repo_root = abs_testdata("crossroot/repo");
     let kafka_src = abs_testdata("crossroot/repo/py/kafka/src");
 
-    let trees = Trees::build([repo_root.clone(), kafka_src.clone()].into(), true, Default::default(), None);
+    let trees = Trees::build([repo_root.clone(), kafka_src.clone()].into(), true, None);
 
     let input: HashSet<PathBuf> = [kafka_src.join("avn/kafka/consumer.py")].into();
     let deps = trees.get_dependees(&input);
@@ -98,7 +98,6 @@ fn test_cross_project_avn_imports() {
     let trees = Trees::build(
         [repo_root.clone(), kafka_src.clone(), metrics_src.clone()].into(),
         true,
-        Default::default(),
         None,
     );
 
@@ -121,7 +120,6 @@ fn test_transitive_cross_root() {
     let trees = Trees::build(
         [repo_root.clone(), kafka_src.clone(), metrics_src.clone()].into(),
         true,
-        Default::default(),
         None,
     );
 
