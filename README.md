@@ -45,13 +45,18 @@ shorts [flags] [<dependency>...]
 | `--root-glob <pattern>` | Glob pattern for Python source root directories (repeatable) |
 | `--roots-from-stdin` | Read source roots from stdin (one per line) |
 | `--exclude <pattern>` | Glob pattern to exclude from output (repeatable) |
+| `--filter <pattern>` | Glob pattern to include in output — only matching paths are shown (repeatable) |
 | `--json` | Output results as JSON |
 | `--explain` | Show which input file triggered each dependee |
 | `--debug` | Show why each file was included (e.g. which symbol triggered it) |
+| `--changed-files-only` | Output only the changed files (no dependee analysis) |
+| `--dependencies` | Show forward dependencies (what the input files import) instead of reverse dependees |
+| `--stdin` | Read additional file paths from stdin to merge into output (deduplicated) |
 | `--namespace-packages` | Support PEP 420 namespace packages (root detection without `__init__.py`) |
 | `--build-files` | Include the nearest pants BUILD file for each dependee in output |
 | `--show-build-files` | Include referencing BUILD files in the dependees list when non-Python files trigger a reverse lookup |
 | `--build-file-name <name>` | Base name for BUILD files (default: `BUILD`). Matches exact name and `name.*` variants. |
+| `--cache-dir <path>` | Directory for the `.shorts` cache (default: git repo root, or cwd if not in a repo) |
 | `--version` | Print version and exit |
 
 ### Examples
@@ -203,9 +208,15 @@ symbols they use from B.
 
 ### Caching
 
-`shorts` caches import metadata and per-symbol content hashes in
-`.shorts/cache.json` (under the git root). Files are re-parsed only when their
-mtime changes. This typically yields a significant speedup on subsequent runs.
+`shorts` maintains a content-addressable cache of import metadata and per-symbol
+hashes in `.shorts/cache/` (under the git root by default). Cache keys are
+derived from file content and module position, so the same cache can be safely
+shared across branches in CI — entries are never invalidated by branch switches,
+only by actual content changes.
+
+Cache entries are stored as individual bincode files in a sharded directory
+structure. Unused entries are gradually pruned (~5% per run). Use `--cache-dir`
+to store the cache elsewhere (e.g. a shared CI cache directory).
 
 The cache directory is automatically gitignored.
 

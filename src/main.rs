@@ -94,6 +94,10 @@ struct Cli {
     /// Base name for BUILD files. Matches exact name and name.* variants.
     #[arg(long, default_value = "BUILD")]
     build_file_name: String,
+
+    /// Directory for the .shorts cache. Default: git repo root (or cwd if not in a repo).
+    #[arg(long)]
+    cache_dir: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -603,7 +607,14 @@ fn main() {
     }
 
     // 6. Set up cache directory, gitignore, and clean up legacy cache
-    let cache_dir = repo.as_ref().map(|r| r.root()).unwrap_or(&cwd);
+    let cache_dir_buf: PathBuf;
+    let cache_dir: &Path = if let Some(ref dir) = cli.cache_dir {
+        let p = PathBuf::from(dir);
+        cache_dir_buf = if p.is_absolute() { p } else { cwd.join(&p) };
+        &cache_dir_buf
+    } else {
+        repo.as_ref().map(|r| r.root()).unwrap_or(&cwd)
+    };
     shorts::cache::ensure_gitignored(cache_dir);
     shorts::cache::remove_legacy_cache(cache_dir);
 
