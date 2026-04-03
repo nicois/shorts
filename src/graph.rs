@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
+use rustc_hash::{FxHashMap, FxHashSet};
 use walkdir::WalkDir;
 
 use crate::cache::{self, ImportCache};
@@ -29,15 +30,15 @@ fn format_symbol_list(symbols: &HashSet<Symbol>) -> String {
 pub struct Tree {
     pub root: PathBuf,
     /// Module-level reverse edges (existing)
-    pub importers: HashMap<String, HashSet<String>>,
+    pub importers: FxHashMap<String, FxHashSet<String>>,
     /// Module-level forward edges: module -> set of modules it imports
-    pub dependencies: HashMap<String, HashSet<String>>,
+    pub dependencies: FxHashMap<String, FxHashSet<String>>,
     /// Symbol-level reverse edges:
     /// (imported_module, symbol_name) -> set of importer module names
-    pub symbol_importers: HashMap<(String, String), HashSet<String>>,
+    pub symbol_importers: FxHashMap<(String, String), FxHashSet<String>>,
     /// Modules that depend on ALL symbols of a given module
     /// (star imports, getattr, module escaping)
-    pub all_importers: HashMap<String, HashSet<String>>,
+    pub all_importers: FxHashMap<String, FxHashSet<String>>,
 }
 
 /// Collection of trees for multi-root support.
@@ -89,7 +90,7 @@ pub fn class_to_path(root: &Path, class: &str) -> Option<PathBuf> {
 /// Per-file result from parallel parsing.
 struct FileResult {
     module_class: String,
-    deps: HashSet<String>,
+    deps: FxHashSet<String>,
     usage: symbols::ModuleSymbolUsage,
 }
 
@@ -135,7 +136,7 @@ impl Tree {
 
                 // Check cache by content hash
                 if let Some(entry) = cache.get(key) {
-                    let deps: HashSet<String> = entry.imports.iter().cloned().collect();
+                    let deps: FxHashSet<String> = entry.imports.iter().cloned().collect();
                     let usage = entry.symbol_usage;
                     return Some((
                         FileResult { module_class, deps, usage },
@@ -144,7 +145,8 @@ impl Tree {
                 }
 
                 // Cache miss: parse everything
-                let deps = extract_imports(&module_class, &source);
+                let deps_vec = extract_imports(&module_class, &source);
+                let deps: FxHashSet<String> = deps_vec.iter().cloned().collect();
                 let semantic_hash = cache::semantic_hash(&source);
                 let sym_hashes = symbols::extract_symbol_hashes(&source);
                 let symbol_hashes: HashMap<String, u64> = sym_hashes
@@ -181,10 +183,11 @@ impl Tree {
             })
             .collect();
 
-        let mut importers: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut dependencies: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut symbol_importers: HashMap<(String, String), HashSet<String>> = HashMap::new();
-        let mut all_importers: HashMap<String, HashSet<String>> = HashMap::new();
+        let num_files = file_results.len();
+        let mut importers: FxHashMap<String, FxHashSet<String>> = FxHashMap::with_capacity_and_hasher(num_files, Default::default());
+        let mut dependencies: FxHashMap<String, FxHashSet<String>> = FxHashMap::with_capacity_and_hasher(num_files, Default::default());
+        let mut symbol_importers: FxHashMap<(String, String), FxHashSet<String>> = FxHashMap::default();
+        let mut all_importers: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
 
         for fr in file_results {
             // Module-level edges (existing reverse + new forward)
@@ -268,8 +271,8 @@ impl Trees {
     }
 
     /// Union of importers from ALL trees for a given class.
-    pub fn get_importers_across_trees(&self, class: &str) -> HashSet<String> {
-        let mut result = HashSet::new();
+    pub fn get_importers_across_trees(&self, class: &str) -> FxHashSet<String> {
+        let mut result = FxHashSet::default();
         for tree in &self.trees {
             if let Some(imps) = tree.importers.get(class) {
                 result.extend(imps.iter().cloned());
@@ -289,8 +292,8 @@ impl Trees {
     }
 
     /// Union of forward dependencies from ALL trees for a given class.
-    pub fn get_dependencies_across_trees(&self, class: &str) -> HashSet<String> {
-        let mut result = HashSet::new();
+    pub fn get_dependencies_across_trees(&self, class: &str) -> FxHashSet<String> {
+        let mut result = FxHashSet::default();
         for tree in &self.trees {
             if let Some(deps) = tree.dependencies.get(class) {
                 result.extend(deps.iter().cloned());
@@ -303,16 +306,16 @@ impl Trees {
     ///
     /// Returns the set of file paths that the input files transitively import.
     pub fn get_dependencies(&self, input_files: &HashSet<PathBuf>) -> HashSet<PathBuf> {
-        let input_classes: HashSet<String> = input_files
+        let input_classes: FxHashSet<String> = input_files
             .iter()
             .filter_map(|p| self.path_to_class_across_trees(p))
             .collect();
 
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen: FxHashSet<String> = FxHashSet::default();
         let mut pending = input_classes;
 
         while !pending.is_empty() {
-            let mut next = HashSet::new();
+            let mut next = FxHashSet::default();
             for class in &pending {
                 if !seen.insert(class.clone()) {
                     continue;
@@ -337,17 +340,17 @@ impl Trees {
     /// depend on the input files.
     pub fn get_dependees(&self, input_files: &HashSet<PathBuf>) -> HashSet<PathBuf> {
         // Convert input file paths to class names
-        let input_classes: HashSet<String> = input_files
+        let input_classes: FxHashSet<String> = input_files
             .iter()
             .filter_map(|p| self.path_to_class_across_trees(p))
             .collect();
 
         // BFS
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen: FxHashSet<String> = FxHashSet::default();
         let mut pending = input_classes;
 
         while !pending.is_empty() {
-            let mut next = HashSet::new();
+            let mut next = FxHashSet::default();
             for class in &pending {
                 if !seen.insert(class.clone()) {
                     continue;
@@ -397,8 +400,8 @@ impl Trees {
     }
 
     /// Get symbol-level importers across all trees for a (module, symbol) pair.
-    fn get_symbol_importers_across_trees(&self, module: &str, symbol: &str) -> HashSet<String> {
-        let mut result = HashSet::new();
+    fn get_symbol_importers_across_trees(&self, module: &str, symbol: &str) -> FxHashSet<String> {
+        let mut result = FxHashSet::default();
         let key = (module.to_string(), symbol.to_string());
         for tree in &self.trees {
             if let Some(imps) = tree.symbol_importers.get(&key) {
@@ -409,8 +412,8 @@ impl Trees {
     }
 
     /// Get all-importers (star imports, getattr, module escaping) across all trees.
-    fn get_all_importers_across_trees(&self, module: &str) -> HashSet<String> {
-        let mut result = HashSet::new();
+    fn get_all_importers_across_trees(&self, module: &str) -> FxHashSet<String> {
+        let mut result = FxHashSet::default();
         for tree in &self.trees {
             if let Some(imps) = tree.all_importers.get(module) {
                 result.extend(imps.iter().cloned());
@@ -460,9 +463,9 @@ impl Trees {
         &self,
         symbol_changes: &HashMap<String, HashSet<Symbol>>,
         fallback_classes: &HashSet<String>,
-    ) -> HashSet<String> {
-        let mut first_hop_classes: HashSet<String> = HashSet::new();
-        let mut seed_classes: HashSet<String> = HashSet::new();
+    ) -> FxHashSet<String> {
+        let mut first_hop_classes: FxHashSet<String> = FxHashSet::default();
+        let mut seed_classes: FxHashSet<String> = FxHashSet::default();
 
         // Symbol-aware first hop
         for (module, changed_symbols) in symbol_changes {
@@ -500,13 +503,13 @@ impl Trees {
         }
 
         // Conservative transitive propagation from first-hop results
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen: FxHashSet<String> = FxHashSet::default();
         seen.extend(seed_classes);
 
         let mut pending = first_hop_classes;
 
         while !pending.is_empty() {
-            let mut next = HashSet::new();
+            let mut next = FxHashSet::default();
             for class in &pending {
                 if !seen.insert(class.clone()) {
                     continue;
@@ -560,11 +563,11 @@ impl Trees {
         &self,
         symbol_changes: &HashMap<String, HashSet<Symbol>>,
         fallback_classes: &HashSet<String>,
-    ) -> HashMap<String, String> {
+    ) -> FxHashMap<String, String> {
         // reason for each class
-        let mut reasons: HashMap<String, String> = HashMap::new();
+        let mut reasons: FxHashMap<String, String> = FxHashMap::default();
         // first-hop classes with their reasons
-        let mut first_hop: HashMap<String, String> = HashMap::new();
+        let mut first_hop: FxHashMap<String, String> = FxHashMap::default();
 
         // Symbol-aware first hop
         for (module, changed_symbols) in symbol_changes {
@@ -617,7 +620,7 @@ impl Trees {
         let mut pending = first_hop;
 
         while !pending.is_empty() {
-            let mut next: HashMap<String, String> = HashMap::new();
+            let mut next: FxHashMap<String, String> = FxHashMap::default();
             for (class, reason) in pending {
                 if reasons.contains_key(&class) {
                     continue;
@@ -683,8 +686,8 @@ mod tests {
     use super::*;
 
     fn make_tree(root: &str, edges: &[(&str, &str)]) -> Tree {
-        let mut importers: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut dependencies: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut importers: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
+        let mut dependencies: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
         for (imported, importer) in edges {
             importers
                 .entry(imported.to_string())
@@ -699,8 +702,8 @@ mod tests {
             root: PathBuf::from(root),
             importers,
             dependencies,
-            symbol_importers: HashMap::new(),
-            all_importers: HashMap::new(),
+            symbol_importers: FxHashMap::default(),
+            all_importers: FxHashMap::default(),
         }
     }
 
@@ -889,8 +892,8 @@ mod tests {
         symbol_edges: &[(&str, &str, &str)],
         all_edges: &[(&str, &str)],
     ) -> Tree {
-        let mut importers: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut dependencies: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut importers: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
+        let mut dependencies: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
         for (imported, importer) in module_edges {
             importers
                 .entry(imported.to_string())
@@ -901,14 +904,14 @@ mod tests {
                 .or_default()
                 .insert(imported.to_string());
         }
-        let mut symbol_importers: HashMap<(String, String), HashSet<String>> = HashMap::new();
+        let mut symbol_importers: FxHashMap<(String, String), FxHashSet<String>> = FxHashMap::default();
         for (module, symbol, importer) in symbol_edges {
             symbol_importers
                 .entry((module.to_string(), symbol.to_string()))
                 .or_default()
                 .insert(importer.to_string());
         }
-        let mut all_importers: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut all_importers: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
         for (module, importer) in all_edges {
             all_importers
                 .entry(module.to_string())

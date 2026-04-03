@@ -4,6 +4,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use rayon::prelude::*;
 use ruff_python_parser::{parse_unchecked, Mode, ParseOptions};
 use ruff_text_size::Ranged;
 use serde::{Deserialize, Serialize};
@@ -74,7 +75,7 @@ fn entry_path(cache_base: &Path, hash: u64) -> PathBuf {
         .join(".shorts")
         .join("cache")
         .join(&hex[..2])
-        .join(format!("{}.json", hex))
+        .join(format!("{}.bin", hex))
 }
 
 /// Ensure `.shorts/` is listed in `.gitignore` at the repo root.
@@ -106,6 +107,20 @@ pub fn remove_legacy_cache(base: &Path) {
             log::warn!("failed to remove legacy cache: {}", e);
         }
     }
+    // Also remove old JSON-format cache entries (from pre-bincode versions)
+    let cache_root = base.join(".shorts").join("cache");
+    if cache_root.exists() {
+        for entry in walkdir::WalkDir::new(&cache_root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.file_type().is_file()
+                && entry.path().extension().and_then(|e| e.to_str()) == Some("json")
+            {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 impl ImportCache {
@@ -125,8 +140,8 @@ impl ImportCache {
     pub fn get(&self, hash: u64) -> Option<CacheEntry> {
         let base = self.cache_dir.as_ref()?;
         let path = entry_path(base, hash);
-        let data = fs::read_to_string(&path).ok()?;
-        let entry: CacheEntry = serde_json::from_str(&data).ok()?;
+        let data = fs::read(&path).ok()?;
+        let entry: CacheEntry = bincode::deserialize(&data).ok()?;
         // Reject old-format entries that lack symbol hashes
         if entry.symbol_hashes.is_none() {
             return None;
@@ -135,28 +150,37 @@ impl ImportCache {
         Some(entry)
     }
 
-    /// Write cache entries to disk as individual JSON files.
+    /// Write cache entries to disk as individual bincode files.
     ///
     /// Uses an atomic write pattern: writes to a `.tmp` file then renames.
+    /// Writes are parallelized with rayon for better throughput on cold cache.
     pub fn write_entries(&self, entries: Vec<(u64, CacheEntry)>) {
         let base = match self.cache_dir.as_ref() {
             Some(b) => b,
             None => return,
         };
-        for (hash, entry) in entries {
-            let path = entry_path(base, hash);
+        // Pre-create all needed shard directories (serial, cheap)
+        let mut dirs: HashSet<PathBuf> = HashSet::new();
+        for (hash, _) in &entries {
+            let path = entry_path(base, *hash);
             if let Some(parent) = path.parent() {
-                if let Err(e) = fs::create_dir_all(parent) {
-                    log::warn!("failed to create cache dir {}: {}", parent.display(), e);
-                    continue;
-                }
+                dirs.insert(parent.to_path_buf());
             }
+        }
+        for dir in &dirs {
+            if let Err(e) = fs::create_dir_all(dir) {
+                log::warn!("failed to create cache dir {}: {}", dir.display(), e);
+            }
+        }
+        // Write entries in parallel
+        entries.par_iter().for_each(|(hash, entry)| {
+            let path = entry_path(base, *hash);
             let tmp_path = path.with_extension("tmp");
-            match serde_json::to_string(&entry) {
-                Ok(json) => {
-                    if let Err(e) = fs::write(&tmp_path, &json) {
+            match bincode::serialize(entry) {
+                Ok(data) => {
+                    if let Err(e) = fs::write(&tmp_path, &data) {
                         log::warn!("failed to write cache tmp file: {}", e);
-                        continue;
+                        return;
                     }
                     if let Err(e) = fs::rename(&tmp_path, &path) {
                         log::warn!("failed to rename cache file: {}", e);
@@ -165,7 +189,7 @@ impl ImportCache {
                 }
                 Err(e) => log::warn!("failed to serialize cache entry: {}", e),
             }
-        }
+        });
     }
 
     /// Write entries, mark them as accessed, then prune stale entries.
@@ -201,7 +225,7 @@ impl ImportCache {
                 continue;
             }
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            if path.extension().and_then(|e| e.to_str()) != Some("bin") {
                 continue;
             }
             // Parse hash from filename stem
@@ -354,7 +378,7 @@ mod tests {
                 e.path()
                     .extension()
                     .and_then(|ext| ext.to_str())
-                    == Some("json")
+                    == Some("bin")
             })
             .count()
     }
