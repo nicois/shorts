@@ -56,7 +56,7 @@ shorts [flags] [<dependency>...]
 | `--build-files` | Include the nearest pants BUILD file for each dependee in output |
 | `--show-build-files` | Include referencing BUILD files in the dependees list when non-Python files trigger a reverse lookup |
 | `--build-file-name <name>` | Base name for BUILD files (default: `BUILD`). Matches exact name and `name.*` variants. |
-| `--cache-dir <path>` | Directory for the `.shorts` cache (default: git repo root, or cwd if not in a repo) |
+| `--cache-dir <path>` | Directory for the cache (default: `~/.cache/shorts`) |
 | `--version` | Print version and exit |
 
 ### Examples
@@ -209,16 +209,14 @@ symbols they use from B.
 ### Caching
 
 `shorts` maintains a content-addressable cache of import metadata and per-symbol
-hashes in `.shorts/cache/` (under the git root by default). Cache keys are
-derived from file content and module position, so the same cache can be safely
-shared across branches in CI — entries are never invalidated by branch switches,
-only by actual content changes.
+hashes in `~/.cache/shorts/` by default. Cache keys are derived from file
+content and module position, so the same cache can be safely shared across
+repos and branches — entries are never invalidated by branch switches, only by
+actual content changes.
 
 Cache entries are stored as individual bincode files in a sharded directory
 structure. Unused entries are gradually pruned (~5% per run). Use `--cache-dir`
 to store the cache elsewhere (e.g. a shared CI cache directory).
-
-The cache directory is automatically gitignored.
 
 ### Root detection
 

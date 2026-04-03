@@ -95,7 +95,7 @@ struct Cli {
     #[arg(long, default_value = "BUILD")]
     build_file_name: String,
 
-    /// Directory for the .shorts cache. Default: git repo root (or cwd if not in a repo).
+    /// Directory for the cache. Default: ~/.cache/shorts.
     #[arg(long)]
     cache_dir: Option<String>,
 }
@@ -606,17 +606,17 @@ fn main() {
         log::debug!("BUILD files referencing non-python changes: {:?}", referencing_build_files);
     }
 
-    // 6. Set up cache directory, gitignore, and clean up legacy cache
-    let cache_dir_buf: PathBuf;
-    let cache_dir: &Path = if let Some(ref dir) = cli.cache_dir {
+    // 6. Determine cache directory
+    let cache_dir_buf: Option<PathBuf> = if let Some(ref dir) = cli.cache_dir {
         let p = PathBuf::from(dir);
-        cache_dir_buf = if p.is_absolute() { p } else { cwd.join(&p) };
-        &cache_dir_buf
+        Some(if p.is_absolute() { p } else { cwd.join(&p) })
     } else {
-        repo.as_ref().map(|r| r.root()).unwrap_or(&cwd)
+        shorts::cache::default_cache_dir()
     };
-    shorts::cache::check_gitignored(cache_dir);
-    shorts::cache::remove_legacy_cache(cache_dir);
+    if cache_dir_buf.is_none() {
+        log::warn!("could not determine cache directory; caching disabled");
+    }
+    let cache_dir_opt: Option<&Path> = cache_dir_buf.as_deref();
 
     // Filter input files to only semantically changed ones
     //    (only when files come from git detection, not explicit CLI args)
@@ -638,7 +638,7 @@ fn main() {
         symbol_changes.len(), fallback_files.len());
 
     // 7. Build trees
-    let trees = Trees::build(python_roots.clone(), cli.namespace_packages, Some(cache_dir));
+    let trees = Trees::build(python_roots.clone(), cli.namespace_packages, cache_dir_opt);
 
     // 7b. Read additional paths from stdin if --stdin
     let stdin_paths: HashSet<PathBuf> = if cli.stdin {

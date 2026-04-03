@@ -72,53 +72,13 @@ pub fn semantic_hash(source: &str) -> u64 {
 fn entry_path(cache_base: &Path, hash: u64) -> PathBuf {
     let hex = format!("{:016x}", hash);
     cache_base
-        .join(".shorts")
-        .join("cache")
         .join(&hex[..2])
         .join(format!("{}.bin", hex))
 }
 
-/// Warn if `.shorts/` is not listed in `.gitignore` at the repo root.
-pub fn check_gitignored(repo_root: &Path) {
-    let gitignore = repo_root.join(".gitignore");
-    let content = match fs::read_to_string(&gitignore) {
-        Ok(c) => c,
-        Err(_) => {
-            log::warn!(".shorts/ is not in .gitignore — consider adding it");
-            return;
-        }
-    };
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == ".shorts/" || trimmed == ".shorts" {
-            return;
-        }
-    }
-    log::warn!(".shorts/ is not in .gitignore — consider adding it");
-}
-
-/// Remove the legacy single-file cache if it exists.
-pub fn remove_legacy_cache(base: &Path) {
-    let legacy = base.join(".shorts").join("cache.json");
-    if legacy.exists() {
-        if let Err(e) = fs::remove_file(&legacy) {
-            log::warn!("failed to remove legacy cache: {}", e);
-        }
-    }
-    // Also remove old JSON-format cache entries (from pre-bincode versions)
-    let cache_root = base.join(".shorts").join("cache");
-    if cache_root.exists() {
-        for entry in walkdir::WalkDir::new(&cache_root)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if entry.file_type().is_file()
-                && entry.path().extension().and_then(|e| e.to_str()) == Some("json")
-            {
-                let _ = fs::remove_file(entry.path());
-            }
-        }
-    }
+/// Return the default cache directory: `~/.cache/shorts`.
+pub fn default_cache_dir() -> Option<PathBuf> {
+    dirs::cache_dir().map(|d| d.join("shorts"))
 }
 
 impl ImportCache {
@@ -209,13 +169,12 @@ impl ImportCache {
             Some(b) => b,
             None => return,
         };
-        let cache_root = base.join(".shorts").join("cache");
-        if !cache_root.exists() {
+        if !base.exists() {
             return;
         }
         let accessed = self.accessed.lock().unwrap().clone();
         let mut unaccessed_count: u64 = 0;
-        for entry in walkdir::WalkDir::new(&cache_root)
+        for entry in walkdir::WalkDir::new(base)
             .into_iter()
             .filter_map(|e| e.ok())
         {
@@ -364,11 +323,10 @@ mod tests {
     use tempfile::TempDir;
 
     fn count_cache_files(dir: &Path) -> usize {
-        let cache_root = dir.join(".shorts").join("cache");
-        if !cache_root.exists() {
+        if !dir.exists() {
             return 0;
         }
-        walkdir::WalkDir::new(&cache_root)
+        walkdir::WalkDir::new(dir)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
