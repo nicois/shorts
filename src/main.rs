@@ -276,6 +276,85 @@ fn default_sources(target_type: &str) -> Vec<String> {
     }
 }
 
+fn matches_source_patterns(filename: &str, patterns: &[String]) -> bool {
+    let mut matched = false;
+    for pattern in patterns {
+        if let Some(neg) = pattern.strip_prefix('!') {
+            if glob::Pattern::new(neg).map_or(false, |p| p.matches(filename)) {
+                return false;
+            }
+        } else if glob::Pattern::new(pattern).map_or(false, |p| p.matches(filename)) {
+            matched = true;
+        }
+    }
+    matched
+}
+
+fn build_target_map(files: &[PathBuf], build_file_name: &str) -> HashMap<PathBuf, String> {
+    let mut result = HashMap::new();
+    // Cache parsed BUILD files by directory to avoid re-parsing
+    let mut dir_cache: HashMap<PathBuf, Vec<BuildTarget>> = HashMap::new();
+
+    for file in files {
+        let filename = match file.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+
+        let build_files = find_build_files(file, build_file_name);
+        if build_files.is_empty() {
+            continue;
+        }
+
+        let dir = match build_files[0].parent() {
+            Some(d) => d.to_path_buf(),
+            None => continue,
+        };
+
+        let targets = dir_cache.entry(dir.clone()).or_insert_with(|| {
+            let dir_name = dir.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown");
+            let mut all_targets = Vec::new();
+            for build_path in &build_files {
+                if let Ok(content) = std::fs::read_to_string(build_path) {
+                    all_targets.extend(parse_build_targets(&content, dir_name));
+                }
+            }
+            // Re-sort after merging multiple BUILD files
+            all_targets.sort_by(|a, b| {
+                let priority = |t: &str| -> u8 {
+                    match t { "python_tests" => 0, "python_sources" => 1, _ => 2 }
+                };
+                priority(&a.target_type).cmp(&priority(&b.target_type))
+            });
+            all_targets
+        });
+
+        for target in targets {
+            if matches_source_patterns(filename, &target.sources) {
+                result.insert(file.clone(), target.name.clone());
+                break;
+            }
+        }
+    }
+
+    result
+}
+
+fn format_path_with_target(
+    path: &Path,
+    cwd: &Path,
+    relative: bool,
+    target_map: &HashMap<PathBuf, String>,
+) -> String {
+    let base = format_path(path, cwd, relative);
+    match target_map.get(path) {
+        Some(target_name) => format!("{}:{}", base, target_name),
+        None => base,
+    }
+}
+
 /// Find all build files for a Python file by walking up from its directory.
 /// Matches the exact `base_name` and `base_name.*` variants.
 /// Returns files from the nearest directory that contains any match.
@@ -1248,5 +1327,47 @@ python_sources(
 "#;
         let targets = parse_build_targets(content, "mydir");
         assert_eq!(targets[0].sources, vec!["*.py", "!test_*.py"]);
+    }
+
+    #[test]
+    fn test_matches_source_patterns_positive() {
+        assert!(matches_source_patterns("test_foo.py", &[
+            "test_*.py".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn test_matches_source_patterns_negative() {
+        // *.py matches, but !test_*.py excludes
+        assert!(!matches_source_patterns("test_foo.py", &[
+            "*.py".to_string(),
+            "!test_*.py".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn test_matches_source_patterns_no_positive_match() {
+        assert!(!matches_source_patterns("setup.cfg", &[
+            "*.py".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn test_format_path_with_target_has_suffix() {
+        let cwd = PathBuf::from("/repo");
+        let path = PathBuf::from("/repo/tests/test_foo.py");
+        let mut target_map = HashMap::new();
+        target_map.insert(PathBuf::from("/repo/tests/test_foo.py"), "tests".to_string());
+        let result = format_path_with_target(&path, &cwd, true, &target_map);
+        assert_eq!(result, "tests/test_foo.py:tests");
+    }
+
+    #[test]
+    fn test_format_path_with_target_no_suffix() {
+        let cwd = PathBuf::from("/repo");
+        let path = PathBuf::from("/repo/src/app.py");
+        let target_map = HashMap::new();
+        let result = format_path_with_target(&path, &cwd, true, &target_map);
+        assert_eq!(result, "src/app.py");
     }
 }
