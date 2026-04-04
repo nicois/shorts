@@ -1114,3 +1114,88 @@ fn test_forward_lookup_unaffected_by_show_build_files() {
     assert!(!build_files.is_empty(),
         "forward lookup should include BUILD files for Python dependees: {stdout}");
 }
+
+// ── --pants-targets tests ──
+
+#[test]
+fn test_pants_targets_text_output() {
+    let root = testdata("");
+    let dir = testdata("pantstargets");
+    let output = shorts_bin()
+        .args(["--root", root.to_str().unwrap(), "--pants-targets", "--relative"])
+        .arg(dir.join("app.py"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("test_app.py:tests"), "expected :tests suffix in: {stdout}");
+}
+
+#[test]
+fn test_pants_targets_source_suffix() {
+    let root = testdata("");
+    let dir = testdata("pantstargets");
+    let output = shorts_bin()
+        .args([
+            "--root", root.to_str().unwrap(),
+            "--pants-targets", "--relative",
+            "--changed-files-only",
+        ])
+        .arg(dir.join("app.py"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("app.py:sources"), "expected :sources suffix in: {stdout}");
+}
+
+#[test]
+fn test_pants_targets_json_output() {
+    let root = testdata("");
+    let dir = testdata("pantstargets");
+    let output = shorts_bin()
+        .args(["--root", root.to_str().unwrap(), "--pants-targets", "--relative", "--json"])
+        .arg(dir.join("app.py"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .expect(&format!("invalid JSON: {stdout}"));
+    let deps = parsed["dependees"].as_array().unwrap();
+    let has_suffix = deps.iter().any(|d| d.as_str().unwrap().contains(":tests"));
+    assert!(has_suffix, "expected :tests suffix in JSON dependees: {stdout}");
+}
+
+#[test]
+fn test_pants_targets_conftest_gets_tests_suffix() {
+    let root = testdata("");
+    let dir = testdata("pantstargets");
+    let output = shorts_bin()
+        .args([
+            "--root", root.to_str().unwrap(),
+            "--pants-targets", "--relative",
+            "--changed-files-only",
+        ])
+        .arg(dir.join("conftest.py"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("conftest.py:tests"), "expected :tests suffix for conftest.py in: {stdout}");
+}
+
+#[test]
+fn test_without_pants_targets_no_suffix() {
+    let root = testdata("");
+    let dir = testdata("pantstargets");
+    let output = shorts_bin()
+        .args(["--root", root.to_str().unwrap()])
+        .arg(dir.join("app.py"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains(":tests"), "should not have suffix without --pants-targets: {stdout}");
+    assert!(!stdout.contains(":sources"), "should not have suffix without --pants-targets: {stdout}");
+}
