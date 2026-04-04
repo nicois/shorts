@@ -153,11 +153,22 @@ fn parse_build_targets(content: &str, default_name: &str) -> Vec<BuildTarget> {
             .unwrap_or(pos);
         let target_type = content[ident_start..paren_pos].trim();
 
-        // Find matching ')' with bracket counting
+        // Find matching ')' with bracket counting, skipping string literals
         let mut depth = 1u32;
         let mut j = paren_pos + 1;
         while j < len && depth > 0 {
             match bytes[j] {
+                b'"' | b'\'' => {
+                    let quote = bytes[j];
+                    j += 1;
+                    while j < len && bytes[j] != quote {
+                        if bytes[j] == b'\\' {
+                            j += 1; // skip escaped char
+                        }
+                        j += 1;
+                    }
+                    // j now points at closing quote (or end)
+                }
                 b'(' => depth += 1,
                 b')' => depth -= 1,
                 _ => {}
@@ -1001,8 +1012,7 @@ fn main() {
 
         let dep_paths: Vec<PathBuf> = entries.iter().map(|(p, _)| p.clone()).collect();
         let target_map = if cli.pants_targets {
-            let paths: Vec<PathBuf> = entries.iter().map(|(p, _)| p.clone()).collect();
-            build_target_map(&paths, &cli.build_file_name)
+            build_target_map(&dep_paths, &cli.build_file_name)
         } else {
             HashMap::new()
         };
@@ -1112,8 +1122,7 @@ fn main() {
 
         let dep_paths: Vec<PathBuf> = entries.iter().map(|(p, _)| p.clone()).collect();
         let target_map = if cli.pants_targets {
-            let paths: Vec<PathBuf> = entries.iter().map(|(p, _)| p.clone()).collect();
-            build_target_map(&paths, &cli.build_file_name)
+            build_target_map(&dep_paths, &cli.build_file_name)
         } else {
             HashMap::new()
         };
@@ -1376,6 +1385,19 @@ python_tests(
 "#;
         let targets = parse_build_targets(content, "mydir");
         assert_eq!(targets[0].name, "correct");
+    }
+
+    #[test]
+    fn test_parse_skips_parens_in_strings() {
+        let content = r#"
+python_tests(
+    name="tests",
+    tags=["slow (integration)"],
+)
+"#;
+        let targets = parse_build_targets(content, "mydir");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].name, "tests");
     }
 
     #[test]
