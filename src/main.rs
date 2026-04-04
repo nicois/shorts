@@ -95,6 +95,10 @@ struct Cli {
     #[arg(long, default_value = "BUILD")]
     build_file_name: String,
 
+    /// Append pants-style :target_name suffixes to output paths based on BUILD file target definitions.
+    #[arg(long)]
+    pants_targets: bool,
+
     /// Directory for the cache. Default: ~/.cache/shorts.
     #[arg(long)]
     cache_dir: Option<String>,
@@ -769,11 +773,20 @@ fn main() {
 
     // 5a. Handle --changed-files-only: output input files and exit
     if cli.changed_files_only {
-        let mut file_strs: Vec<String> = input_files
+        let filtered: Vec<PathBuf> = input_files
             .iter()
             .filter(|f| !should_exclude(f, &cwd, &cli.excludes))
             .filter(|f| should_include(f, &cwd, &cli.filters))
-            .map(|f| format_path(f, &cwd, cli.relative))
+            .cloned()
+            .collect();
+        let target_map = if cli.pants_targets {
+            build_target_map(&filtered, &cli.build_file_name)
+        } else {
+            HashMap::new()
+        };
+        let mut file_strs: Vec<String> = filtered
+            .iter()
+            .map(|f| format_path_with_target(f, &cwd, cli.relative, &target_map))
             .collect();
         file_strs.sort();
 
@@ -911,19 +924,31 @@ fn main() {
             .collect();
         dep_paths.sort();
 
+        let target_map = if cli.pants_targets {
+            build_target_map(&dep_paths, &cli.build_file_name)
+        } else {
+            HashMap::new()
+        };
+
         if cli.json {
             let dependees: Vec<String> = dep_paths
                 .iter()
-                .map(|p| format_path(p, &cwd, cli.relative))
+                .map(|p| format_path_with_target(p, &cwd, cli.relative, &target_map))
                 .collect();
             let mut root_strs: Vec<String> = python_roots
                 .iter()
                 .map(|r| format_path(r, &cwd, cli.relative))
                 .collect();
             root_strs.sort();
+            let all_input_vec: Vec<PathBuf> = all_input.iter().cloned().collect();
+            let changed_target_map = if cli.pants_targets {
+                build_target_map(&all_input_vec, &cli.build_file_name)
+            } else {
+                HashMap::new()
+            };
             let mut changed_strs: Vec<String> = all_input
                 .iter()
-                .map(|f| format_path(f, &cwd, cli.relative))
+                .map(|f| format_path_with_target(f, &cwd, cli.relative, &changed_target_map))
                 .collect();
             changed_strs.sort();
             let output = JsonOutput {
@@ -940,7 +965,7 @@ fn main() {
         } else {
             let sep = if cli.null_separator { "\0" } else { "\n" };
             for dep in &dep_paths {
-                let dep_str = format_path(dep, &cwd, cli.relative);
+                let dep_str = format_path_with_target(dep, &cwd, cli.relative, &target_map);
                 print!("{}{}", dep_str, sep);
             }
         }
@@ -975,6 +1000,12 @@ fn main() {
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
         let dep_paths: Vec<PathBuf> = entries.iter().map(|(p, _)| p.clone()).collect();
+        let target_map = if cli.pants_targets {
+            let paths: Vec<PathBuf> = entries.iter().map(|(p, _)| p.clone()).collect();
+            build_target_map(&paths, &cli.build_file_name)
+        } else {
+            HashMap::new()
+        };
         let build_strs: Vec<String> = if cli.build_files {
             let mut all_builds: HashSet<PathBuf> = HashSet::new();
             for b in collect_build_files(&dep_paths, &cli.build_file_name) {
@@ -996,11 +1027,11 @@ fn main() {
             let mut dependees: Vec<String> = Vec::new();
             let mut explanations: HashMap<String, Vec<String>> = HashMap::new();
             for (dep, triggers) in &entries {
-                let dep_str = format_path(dep, &cwd, cli.relative);
+                let dep_str = format_path_with_target(dep, &cwd, cli.relative, &target_map);
                 dependees.push(dep_str.clone());
                 let mut trigger_strs: Vec<String> = triggers
                     .iter()
-                    .map(|t| format_path(t, &cwd, cli.relative))
+                    .map(|t| format_path_with_target(t, &cwd, cli.relative, &target_map))
                     .collect();
                 trigger_strs.sort();
                 explanations.insert(dep_str, trigger_strs);
@@ -1013,9 +1044,15 @@ fn main() {
                 .collect();
             root_strs.sort();
 
+            let input_files_vec: Vec<PathBuf> = input_files.iter().cloned().collect();
+            let changed_target_map = if cli.pants_targets {
+                build_target_map(&input_files_vec, &cli.build_file_name)
+            } else {
+                HashMap::new()
+            };
             let mut changed_strs: Vec<String> = input_files
                 .iter()
-                .map(|f| format_path(f, &cwd, cli.relative))
+                .map(|f| format_path_with_target(f, &cwd, cli.relative, &changed_target_map))
                 .collect();
             changed_strs.sort();
 
@@ -1033,10 +1070,10 @@ fn main() {
         } else {
             let sep = if cli.null_separator { "\0" } else { "\n" };
             for (dep, triggers) in &entries {
-                let dep_str = format_path(dep, &cwd, cli.relative);
+                let dep_str = format_path_with_target(dep, &cwd, cli.relative, &target_map);
                 let trigger_strs: Vec<String> = triggers
                     .iter()
-                    .map(|t| format_path(t, &cwd, cli.relative))
+                    .map(|t| format_path_with_target(t, &cwd, cli.relative, &target_map))
                     .collect();
                 print!(
                     "{}  (triggered by: {}){}",
@@ -1074,6 +1111,12 @@ fn main() {
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
         let dep_paths: Vec<PathBuf> = entries.iter().map(|(p, _)| p.clone()).collect();
+        let target_map = if cli.pants_targets {
+            let paths: Vec<PathBuf> = entries.iter().map(|(p, _)| p.clone()).collect();
+            build_target_map(&paths, &cli.build_file_name)
+        } else {
+            HashMap::new()
+        };
         let build_strs: Vec<String> = if cli.build_files {
             let mut all_builds: HashSet<PathBuf> = HashSet::new();
             for b in collect_build_files(&dep_paths, &cli.build_file_name) {
@@ -1095,7 +1138,7 @@ fn main() {
             let mut dependees: Vec<String> = Vec::new();
             let mut reasons: HashMap<String, String> = HashMap::new();
             for (dep, reason) in &entries {
-                let dep_str = format_path(dep, &cwd, cli.relative);
+                let dep_str = format_path_with_target(dep, &cwd, cli.relative, &target_map);
                 dependees.push(dep_str.clone());
                 reasons.insert(dep_str, reason.clone());
             }
@@ -1107,9 +1150,15 @@ fn main() {
                 .collect();
             root_strs.sort();
 
+            let input_files_vec: Vec<PathBuf> = input_files.iter().cloned().collect();
+            let changed_target_map = if cli.pants_targets {
+                build_target_map(&input_files_vec, &cli.build_file_name)
+            } else {
+                HashMap::new()
+            };
             let mut changed_strs: Vec<String> = input_files
                 .iter()
-                .map(|f| format_path(f, &cwd, cli.relative))
+                .map(|f| format_path_with_target(f, &cwd, cli.relative, &changed_target_map))
                 .collect();
             changed_strs.sort();
 
@@ -1127,7 +1176,7 @@ fn main() {
         } else {
             let sep = if cli.null_separator { "\0" } else { "\n" };
             for (dep, reason) in &entries {
-                let dep_str = format_path(dep, &cwd, cli.relative);
+                let dep_str = format_path_with_target(dep, &cwd, cli.relative, &target_map);
                 print!("{}  ({}){}",dep_str, reason, sep);
             }
             for build in &build_strs {
@@ -1151,6 +1200,11 @@ fn main() {
             .collect();
         dep_paths.sort();
 
+        let target_map = if cli.pants_targets {
+            build_target_map(&dep_paths, &cli.build_file_name)
+        } else {
+            HashMap::new()
+        };
         let build_strs: Vec<String> = if cli.build_files {
             let mut all_builds: HashSet<PathBuf> = HashSet::new();
             for b in collect_build_files(&dep_paths, &cli.build_file_name) {
@@ -1171,7 +1225,7 @@ fn main() {
         if cli.json {
             let dependees: Vec<String> = dep_paths
                 .iter()
-                .map(|p| format_path(p, &cwd, cli.relative))
+                .map(|p| format_path_with_target(p, &cwd, cli.relative, &target_map))
                 .collect();
 
             let mut root_strs: Vec<String> = python_roots
@@ -1180,9 +1234,15 @@ fn main() {
                 .collect();
             root_strs.sort();
 
+            let input_files_vec: Vec<PathBuf> = input_files.iter().cloned().collect();
+            let changed_target_map = if cli.pants_targets {
+                build_target_map(&input_files_vec, &cli.build_file_name)
+            } else {
+                HashMap::new()
+            };
             let mut changed_strs: Vec<String> = input_files
                 .iter()
-                .map(|f| format_path(f, &cwd, cli.relative))
+                .map(|f| format_path_with_target(f, &cwd, cli.relative, &changed_target_map))
                 .collect();
             changed_strs.sort();
 
@@ -1200,7 +1260,7 @@ fn main() {
         } else {
             let sep = if cli.null_separator { "\0" } else { "\n" };
             for dep in &dep_paths {
-                let dep_str = format_path(dep, &cwd, cli.relative);
+                let dep_str = format_path_with_target(dep, &cwd, cli.relative, &target_map);
                 print!("{}{}", dep_str, sep);
             }
             for build in &build_strs {
